@@ -138,14 +138,16 @@ func (b *Builder) resolveAssetVersion(ctx context.Context, client *resty.Client,
 		if current.SystemProfile != "" {
 			regionCfg.Provider.Profile = current.SystemProfile
 		}
-		if assetVersion == "" {
-			assetVersion = current.AssetVersion
+		if isColorful(regionCfg.Provider.Kind) || regionCfg.Provider.AssetVersionURL == "" {
 			if assetVersion == "" {
-				assetVersion = current.DataVersion
+				assetVersion = current.AssetVersion
+				if assetVersion == "" {
+					assetVersion = current.DataVersion
+				}
 			}
-		}
-		if assetHash == "" {
-			assetHash = current.AssetHash
+			if assetHash == "" {
+				assetHash = current.AssetHash
+			}
 		}
 	}
 
@@ -159,14 +161,14 @@ func (b *Builder) resolveAssetVersion(ctx context.Context, client *resty.Client,
 	if regionCfg.Provider.AppVersion == "" {
 		return regionCfg, "", "", errors.New("failed to resolve appVersion from current_version_url; pass app_version in config or configure current_version_url")
 	}
-	if assetVersion == "" && regionCfg.Provider.AssetVersionURL != "" {
+	if regionCfg.Provider.AssetVersionURL != "" {
 		versionURL := strings.ReplaceAll(regionCfg.Provider.AssetVersionURL, "{app_version}", regionCfg.Provider.AppVersion)
 		resp, err := requestWithRetry(ctx, client, versionURL)
 		if err != nil {
 			return regionCfg, "", "", err
 		}
 		if resp.StatusCode() != http.StatusOK {
-			return regionCfg, "", "", fmt.Errorf("asset_version_url returned %d", resp.StatusCode())
+			return regionCfg, "", "", fmt.Errorf("asset_version_url %s returned %d", versionURL, resp.StatusCode())
 		}
 		assetVersion = strings.TrimSpace(resp.String())
 	}
@@ -263,7 +265,7 @@ func (b *Builder) fetchAssetBundleInfo(ctx context.Context, client *resty.Client
 		return nil, err
 	}
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("asset info returned %d", resp.StatusCode())
+		return nil, fmt.Errorf("asset info %s returned %d", assetURL, resp.StatusCode())
 	}
 	c, err := cryptor.NewSekaiCryptorFromHex(regionCfg.Crypto.AESKeyHex, regionCfg.Crypto.AESIVHex)
 	if err != nil {
