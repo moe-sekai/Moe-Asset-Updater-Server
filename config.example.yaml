@@ -121,3 +121,55 @@ regions:
       enabled: true
       remove_local_after_upload: true
       remove_empty_dirs_after_upload: true
+
+  cn:
+    enabled: true
+    provider:
+      kind: nuverse
+      current_version_url: "https://raw.githubusercontent.com/Team-Haruki/haruki-sekai-sc-master/main/versions/current_version.json"
+      asset_version_url: "https://lf3-mkcncdn-tos.dailygn.com/obj/rt-game-lf/gdl_app_5236/Mainland/{app_version}/Release/cn_online/ios/version"
+      app_version: ""
+      asset_info_url_template: "https://lf3-mkcncdn-tos.dailygn.com/obj/sf-game-lf/gdl_app_5236/AssetBundle/{app_version}/Release/cn_online/ios{asset_version}/AssetBundleInfoNew.json"
+      asset_bundle_url_template: "https://lf3-mkcncdn-tos.dailygn.com/obj/sf-game-lf/gdl_app_5236/AssetBundle/{app_version}/Release/cn_online/{bundle_path}"
+      required_cookies: false
+    crypto:
+      aes_key_hex: "6732666343305a637a4e394d544a3631"
+      aes_iv_hex: "6d737833495630693958453575595a31"
+    runtime:
+      unity_version: "2022.3.21f1"
+    paths:
+      asset_save_dir: "/app/data/cn-assets"
+      downloaded_asset_record_file: "/app/data/cn-assets/downloaded_assets.json"
+    filters:
+      start_app: [".*"]
+      on_demand: [".*"]
+      skip: []
+      priority: [".*"]
+    export:
+      by_category: false
+      keep_types: []
+      keep_extensions: []
+      remove_filtered_files: true
+      usm:
+        export: true
+        decode: true
+      acb:
+        export: true
+        decode: true
+      hca:
+        decode: true
+      images:
+        convert_to_webp: true
+        remove_png: false
+      video:
+        convert_to_mp4: false
+        direct_usm_to_mp4_with_ffmpeg: false
+        remove_m2v: true
+      audio:
+        convert_to_mp3: true
+        convert_to_flac: false
+        remove_wav: true
+    upload:
+      enabled: true
+      remove_local_after_upload: true
+      remove_empty_dirs_after_upload: true

@@ -26,13 +26,13 @@ func NewBuilder(cfg *config.Config) *Builder {
 	return &Builder{cfg: cfg}
 }
 
-func (b *Builder) BuildTasks(ctx context.Context, req protocol.JobRequest, downloaded map[string]string) ([]protocol.TaskPayload, error) {
+func (b *Builder) BuildTasks(ctx context.Context, req protocol.JobRequest, downloaded map[string]string) (protocol.JobRequest, []protocol.TaskPayload, error) {
 	regionCfg, ok := b.cfg.Regions[req.Server]
 	if !ok {
-		return nil, fmt.Errorf("region %s not found in config", req.Server)
+		return req, nil, fmt.Errorf("region %s not found in config", req.Server)
 	}
 	if !regionCfg.Enabled {
-		return nil, fmt.Errorf("region %s is disabled", req.Server)
+		return req, nil, fmt.Errorf("region %s is disabled", req.Server)
 	}
 
 	client := newHTTPClient(regionCfg, b.cfg.Server.Proxy)
@@ -41,22 +41,23 @@ func (b *Builder) BuildTasks(ctx context.Context, req protocol.JobRequest, downl
 		var err error
 		cookie, err = b.parseCookies(ctx, req.Server, client)
 		if err != nil {
-			return nil, err
+			return req, nil, err
 		}
 	}
 
-	assetVersion, assetHash, err := b.resolveAssetVersion(ctx, client, req, regionCfg)
+	var err error
+	regionCfg, req.AssetVersion, req.AssetHash, err = b.resolveAssetVersion(ctx, client, req, regionCfg)
 	if err != nil {
-		return nil, err
+		return req, nil, err
 	}
 
-	info, err := b.fetchAssetBundleInfo(ctx, client, req.Server, regionCfg, assetVersion, assetHash)
+	info, err := b.fetchAssetBundleInfo(ctx, client, req.Server, regionCfg, req.AssetVersion, req.AssetHash)
 	if err != nil {
-		return nil, err
+		return req, nil, err
 	}
 
-	tasks := b.buildDownloadList(req.Server, regionCfg, info, downloaded, assetVersion, assetHash, cookie)
-	return tasks, nil
+	tasks := b.buildDownloadList(req.Server, regionCfg, info, downloaded, req.AssetVersion, req.AssetHash, cookie)
+	return req, tasks, nil
 }
 
 func newHTTPClient(regionCfg config.RegionConfig, proxy string) *resty.Client {
@@ -122,54 +123,108 @@ func retryAttempts(configured int) int {
 	return configured
 }
 
-func (b *Builder) resolveAssetVersion(ctx context.Context, client *resty.Client, req protocol.JobRequest, regionCfg config.RegionConfig) (string, string, error) {
-	if isColorful(regionCfg.Provider.Kind) {
-		if req.AssetVersion != "" && req.AssetHash != "" {
-			return req.AssetVersion, req.AssetHash, nil
-		}
-		if regionCfg.Provider.CurrentVersionURL == "" {
-			return "", "", errors.New("assetVersion and assetHash are required when current_version_url is empty")
-		}
-		resp, err := requestWithRetry(ctx, client, regionCfg.Provider.CurrentVersionURL)
+func (b *Builder) resolveAssetVersion(ctx context.Context, client *resty.Client, req protocol.JobRequest, regionCfg config.RegionConfig) (config.RegionConfig, string, string, error) {
+	assetVersion := strings.TrimSpace(req.AssetVersion)
+	assetHash := strings.TrimSpace(req.AssetHash)
+
+	if regionCfg.Provider.CurrentVersionURL != "" {
+		current, err := b.fetchCurrentVersion(ctx, client, regionCfg.Provider.CurrentVersionURL)
 		if err != nil {
-			return "", "", err
+			return regionCfg, "", "", err
+		}
+		if current.AppVersion != "" {
+			regionCfg.Provider.AppVersion = current.AppVersion
+		}
+		if current.SystemProfile != "" {
+			regionCfg.Provider.Profile = current.SystemProfile
+		}
+		if assetVersion == "" {
+			assetVersion = current.AssetVersion
+			if assetVersion == "" {
+				assetVersion = current.DataVersion
+			}
+		}
+		if assetHash == "" {
+			assetHash = current.AssetHash
+		}
+	}
+
+	if isColorful(regionCfg.Provider.Kind) {
+		if assetVersion == "" || assetHash == "" {
+			return regionCfg, "", "", errors.New("failed to resolve assetVersion/assetHash from current_version_url; pass assetVersion and assetHash explicitly or configure current_version_url")
+		}
+		return regionCfg, assetVersion, assetHash, nil
+	}
+
+	if regionCfg.Provider.AppVersion == "" {
+		return regionCfg, "", "", errors.New("failed to resolve appVersion from current_version_url; pass app_version in config or configure current_version_url")
+	}
+	if assetVersion == "" && regionCfg.Provider.AssetVersionURL != "" {
+		versionURL := strings.ReplaceAll(regionCfg.Provider.AssetVersionURL, "{app_version}", regionCfg.Provider.AppVersion)
+		resp, err := requestWithRetry(ctx, client, versionURL)
+		if err != nil {
+			return regionCfg, "", "", err
 		}
 		if resp.StatusCode() != http.StatusOK {
-			return "", "", fmt.Errorf("current_version_url returned %d", resp.StatusCode())
+			return regionCfg, "", "", fmt.Errorf("asset_version_url returned %d", resp.StatusCode())
 		}
-		version, hash := parseCurrentVersion(resp.Body())
-		if req.AssetVersion != "" {
-			version = req.AssetVersion
-		}
-		if req.AssetHash != "" {
-			hash = req.AssetHash
-		}
-		if version == "" || hash == "" {
-			return "", "", errors.New("failed to resolve assetVersion/assetHash from current_version_url")
-		}
-		return version, hash, nil
+		assetVersion = strings.TrimSpace(resp.String())
 	}
-
-	// Nuverse-style regions resolve the asset version from their own plain-text endpoint.
-	return req.AssetVersion, req.AssetHash, nil
+	if assetVersion == "" {
+		return regionCfg, "", "", errors.New("failed to resolve assetVersion from current_version_url or asset_version_url")
+	}
+	return regionCfg, assetVersion, assetHash, nil
 }
 
-func parseCurrentVersion(body []byte) (string, string) {
+type currentVersionInfo struct {
+	SystemProfile string `json:"systemProfile"`
+	AppVersion    string `json:"appVersion"`
+	DataVersion   string `json:"dataVersion"`
+	AssetVersion  string `json:"assetVersion"`
+	AppHash       string `json:"appHash"`
+	AssetHash     string `json:"assetHash"`
+}
+
+func (b *Builder) fetchCurrentVersion(ctx context.Context, client *resty.Client, url string) (currentVersionInfo, error) {
+	resp, err := requestWithRetry(ctx, client, url)
+	if err != nil {
+		return currentVersionInfo{}, err
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return currentVersionInfo{}, fmt.Errorf("current_version_url returned %d", resp.StatusCode())
+	}
+	current := parseCurrentVersion(resp.Body())
+	if current.AssetVersion == "" && current.DataVersion == "" && current.AppVersion == "" {
+		return currentVersionInfo{}, errors.New("current_version_url did not contain appVersion, assetVersion or dataVersion")
+	}
+	return current, nil
+}
+
+func parseCurrentVersion(body []byte) currentVersionInfo {
+	var current currentVersionInfo
+	_ = sonic.Unmarshal(body, &current)
+	if current.AssetVersion != "" || current.AssetHash != "" || current.AppVersion != "" || current.DataVersion != "" {
+		return current
+	}
+
 	var payload any
 	if err := sonic.Unmarshal(body, &payload); err != nil {
-		return "", ""
+		return currentVersionInfo{}
 	}
-	version := findStringByKey(payload, map[string]bool{
+	current.SystemProfile = findStringByKey(payload, map[string]bool{"systemprofile": true, "system_profile": true})
+	current.AppVersion = findStringByKey(payload, map[string]bool{"appversion": true, "app_version": true})
+	current.DataVersion = findStringByKey(payload, map[string]bool{"dataversion": true, "data_version": true})
+	current.AssetVersion = findStringByKey(payload, map[string]bool{
 		"assetversion":       true,
 		"asset_version":      true,
 		"assetbundleversion": true,
 	})
-	hash := findStringByKey(payload, map[string]bool{
+	current.AssetHash = findStringByKey(payload, map[string]bool{
 		"assethash":       true,
 		"asset_hash":      true,
 		"assetbundlehash": true,
 	})
-	return version, hash
+	return current
 }
 
 func findStringByKey(v any, keys map[string]bool) string {
@@ -240,24 +295,12 @@ func (b *Builder) assetInfoURL(ctx context.Context, client *resty.Client, region
 		return url, nil
 	}
 
-	if provider.AssetVersionURL == "" {
-		return "", errors.New("asset_version_url is required for nuverse provider")
-	}
-	assetVersionURL := strings.ReplaceAll(provider.AssetVersionURL, "{app_version}", provider.AppVersion)
-	resp, err := requestWithRetry(ctx, client, assetVersionURL)
-	if err != nil {
-		return "", err
-	}
-	if resp.StatusCode() != http.StatusOK {
-		return "", fmt.Errorf("asset_version_url returned %d", resp.StatusCode())
-	}
-	nuverseAssetVersion := strings.TrimSpace(resp.String())
-	if nuverseAssetVersion == "" {
-		return "", errors.New("asset_version_url returned an empty version")
+	if assetVersion == "" {
+		return "", errors.New("assetVersion is required for nuverse provider")
 	}
 	url := provider.AssetInfoURLTemplate
 	url = strings.ReplaceAll(url, "{app_version}", provider.AppVersion)
-	url = strings.ReplaceAll(url, "{asset_version}", nuverseAssetVersion)
+	url = strings.ReplaceAll(url, "{asset_version}", assetVersion)
 	return url, nil
 }
 

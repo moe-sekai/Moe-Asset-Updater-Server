@@ -96,11 +96,11 @@ func (s *Server) createJobHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to load downloaded asset record", "error": err.Error()})
 	}
-	tasks, err := s.builder.BuildTasks(context.Background(), req, downloaded)
+	resolvedReq, tasks, err := s.builder.BuildTasks(context.Background(), req, downloaded)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "failed to create asset job", "error": err.Error()})
 	}
-	job := s.scheduler.CreateJob(req, tasks)
+	job := s.scheduler.CreateJob(resolvedReq, tasks)
 	return c.Status(fiber.StatusOK).JSON(protocol.CreateJobResponse{Message: "Asset updater started running", Job: job})
 }
 
