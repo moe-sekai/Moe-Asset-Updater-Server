@@ -63,7 +63,7 @@ func main() {
 		app.Use(logger.New(logCfg))
 	}
 
-	api.New(cfg).RegisterRoutes(app)
+	api.New(cfg, mainLogger).RegisterRoutes(app)
 
 	listenCfg := fiber.ListenConfig{DisableStartupMessage: true}
 	serverType := "HTTP"

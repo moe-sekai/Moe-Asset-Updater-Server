@@ -17,6 +17,7 @@ import (
 
 	"moe-asset-server/internal/catalog"
 	"moe-asset-server/internal/config"
+	harukiLogger "moe-asset-server/internal/logger"
 	"moe-asset-server/internal/protocol"
 	"moe-asset-server/internal/record"
 	"moe-asset-server/internal/scheduler"
@@ -27,20 +28,70 @@ import (
 
 type Server struct {
 	cfg       *config.Config
+	logger    *harukiLogger.Logger
 	builder   *catalog.Builder
 	scheduler *scheduler.Manager
 	records   *record.Manager
 	uploader  *storage.Uploader
 }
 
-func New(cfg *config.Config) *Server {
+func New(cfg *config.Config, logger *harukiLogger.Logger) *Server {
+	if logger == nil {
+		logger = harukiLogger.NewLogger("ServerAPI", cfg.Logging.Level, nil)
+	}
 	return &Server{
 		cfg:       cfg,
+		logger:    logger,
 		builder:   catalog.NewBuilder(cfg),
 		scheduler: scheduler.NewManager(cfg),
 		records:   record.NewManager(cfg),
 		uploader:  storage.NewUploader(cfg),
 	}
+}
+
+func (s *Server) logJobProgress(event string, job protocol.JobSnapshot) {
+	overview := s.scheduler.Overview()
+	jobCompleted := job.Succeeded + job.Failed + job.Cancelled
+	allCompleted := overview.Succeeded + overview.Failed + overview.Cancelled
+	s.logger.Infof(
+		"[%s] job=%s region=%s 总任务=%d 已完成=%d 成功=%d 失败=%d 取消=%d 运行中=%d 排队=%d | 全局任务=%d 全局已完成=%d 全局成功=%d 全局失败=%d 全局取消=%d 全局运行中=%d 全局排队=%d",
+		event,
+		job.ID,
+		job.Region,
+		job.Total,
+		jobCompleted,
+		job.Succeeded,
+		job.Failed,
+		job.Cancelled,
+		job.Running,
+		job.Queued,
+		overview.Total,
+		allCompleted,
+		overview.Succeeded,
+		overview.Failed,
+		overview.Cancelled,
+		overview.Running,
+		overview.Queued,
+	)
+}
+
+func (s *Server) logJobProgressByID(event string, jobID string) {
+	job, ok := s.scheduler.GetJob(jobID)
+	if !ok {
+		return
+	}
+	s.logJobProgress(event, job)
+}
+
+func (s *Server) failTaskAndLog(taskID string, clientID string, message string, event string) error {
+	payload, _ := s.scheduler.TaskPayload(taskID)
+	if err := s.scheduler.Fail(taskID, clientID, message); err != nil {
+		return err
+	}
+	if payload.JobID != "" {
+		s.logJobProgressByID(event, payload.JobID)
+	}
+	return nil
 }
 
 func (s *Server) RegisterRoutes(app *fiber.App) {
@@ -101,6 +152,7 @@ func (s *Server) createJobHandler(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "failed to create asset job", "error": err.Error()})
 	}
 	job := s.scheduler.CreateJob(resolvedReq, tasks)
+	s.logJobProgress("创建任务", job)
 	return c.Status(fiber.StatusOK).JSON(protocol.CreateJobResponse{Message: "Asset updater started running", Job: job})
 }
 
@@ -128,6 +180,7 @@ func (s *Server) cancelJobHandler(c fiber.Ctx) error {
 	if !ok {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"message": "job not found"})
 	}
+	s.logJobProgress("取消任务", job)
 	return c.JSON(job)
 }
 
@@ -191,7 +244,7 @@ func (s *Server) failHandler(c fiber.Ctx) error {
 	if err := c.Bind().Body(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "Invalid request payload", "error": err.Error()})
 	}
-	if err := s.scheduler.Fail(c.Params("task_id"), req.ClientID, req.Error); err != nil {
+	if err := s.failTaskAndLog(c.Params("task_id"), req.ClientID, req.Error, "任务失败"); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
 	return c.JSON(fiber.Map{"ok": true})
@@ -205,40 +258,41 @@ func (s *Server) resultHandler(c fiber.Ctx) error {
 	}
 	manifest, archivePath, stagingDir, err := s.saveResultUpload(c, taskID)
 	if err != nil {
-		_ = s.scheduler.Fail(taskID, "", err.Error())
+		_ = s.failTaskAndLog(taskID, "", err.Error(), "结果上传失败")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid result upload", "error": err.Error()})
 	}
 	defer s.cleanupStaging(stagingDir)
 
 	if err := validateManifestIdentity(manifest, payload); err != nil {
-		_ = s.scheduler.Fail(taskID, "", err.Error())
+		_ = s.failTaskAndLog(taskID, "", err.Error(), "结果校验失败")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "invalid manifest", "error": err.Error()})
 	}
 
 	extractDir := filepath.Join(stagingDir, "extract")
 	if err := extractArchive(archivePath, extractDir); err != nil {
-		_ = s.scheduler.Fail(taskID, "", err.Error())
+		_ = s.failTaskAndLog(taskID, "", err.Error(), "结果解压失败")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "failed to extract result", "error": err.Error()})
 	}
 	if err := validateManifestFiles(extractDir, manifest.Files); err != nil {
-		_ = s.scheduler.Fail(taskID, "", err.Error())
+		_ = s.failTaskAndLog(taskID, "", err.Error(), "结果清单校验失败")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "manifest verification failed", "error": err.Error()})
 	}
 	if err := s.scheduler.MarkUploadingS3(taskID); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
 	if err := s.uploader.UploadManifestFiles(context.Background(), extractDir, manifest.Region, manifest.Files); err != nil {
-		_ = s.scheduler.Fail(taskID, "", err.Error())
+		_ = s.failTaskAndLog(taskID, "", err.Error(), "S3上传失败")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to upload result to storage", "error": err.Error()})
 	}
 	if err := s.records.Mark(manifest.Region, manifest.BundlePath, manifest.BundleHash); err != nil {
-		_ = s.scheduler.Fail(taskID, "", err.Error())
+		_ = s.failTaskAndLog(taskID, "", err.Error(), "记录更新失败")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to update downloaded asset record", "error": err.Error()})
 	}
 	completed, err := s.scheduler.Complete(taskID)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
+	s.logJobProgressByID("任务完成", completed.JobID)
 	return c.JSON(fiber.Map{"ok": true, "task_id": completed.TaskID})
 }
 

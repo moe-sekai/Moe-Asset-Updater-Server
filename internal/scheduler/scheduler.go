@@ -152,6 +152,13 @@ func (m *Manager) ListClients() []protocol.ClientSnapshot {
 	return out
 }
 
+func (m *Manager) Overview() Overview {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.expireLeasesLocked(time.Now())
+	return m.overviewLocked()
+}
+
 func (m *Manager) Register(req protocol.ClientRegistrationRequest) protocol.ClientRegistrationResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -514,6 +521,16 @@ type jobCounts struct {
 	cancelled int
 }
 
+type Overview struct {
+	Jobs      int
+	Total     int
+	Queued    int
+	Running   int
+	Succeeded int
+	Failed    int
+	Cancelled int
+}
+
 func (m *Manager) jobCountsLocked(job *jobState) jobCounts {
 	counts := jobCounts{total: len(job.taskIDs)}
 	for _, taskID := range job.taskIDs {
@@ -521,20 +538,44 @@ func (m *Manager) jobCountsLocked(job *jobState) jobCounts {
 		if task == nil {
 			continue
 		}
-		switch task.status {
-		case protocol.TaskStatusQueued:
-			counts.queued++
-		case protocol.TaskStatusLeased, protocol.TaskStatusRunning, protocol.TaskStatusUploadingResult, protocol.TaskStatusUploadingS3:
-			counts.running++
-		case protocol.TaskStatusSucceeded:
-			counts.succeeded++
-		case protocol.TaskStatusFailed:
-			counts.failed++
-		case protocol.TaskStatusCancelled:
-			counts.cancelled++
-		}
+		accumulateTaskCounts(&counts, task.status)
 	}
 	return counts
+}
+
+func (m *Manager) overviewLocked() Overview {
+	overview := Overview{Jobs: len(m.jobs)}
+	for _, task := range m.tasks {
+		overview.Total++
+		switch task.status {
+		case protocol.TaskStatusQueued:
+			overview.Queued++
+		case protocol.TaskStatusLeased, protocol.TaskStatusRunning, protocol.TaskStatusUploadingResult, protocol.TaskStatusUploadingS3:
+			overview.Running++
+		case protocol.TaskStatusSucceeded:
+			overview.Succeeded++
+		case protocol.TaskStatusFailed:
+			overview.Failed++
+		case protocol.TaskStatusCancelled:
+			overview.Cancelled++
+		}
+	}
+	return overview
+}
+
+func accumulateTaskCounts(counts *jobCounts, status protocol.TaskStatus) {
+	switch status {
+	case protocol.TaskStatusQueued:
+		counts.queued++
+	case protocol.TaskStatusLeased, protocol.TaskStatusRunning, protocol.TaskStatusUploadingResult, protocol.TaskStatusUploadingS3:
+		counts.running++
+	case protocol.TaskStatusSucceeded:
+		counts.succeeded++
+	case protocol.TaskStatusFailed:
+		counts.failed++
+	case protocol.TaskStatusCancelled:
+		counts.cancelled++
+	}
 }
 
 func isTerminal(status protocol.TaskStatus) bool {
