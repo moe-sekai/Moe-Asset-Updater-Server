@@ -1,0 +1,7 @@
+.git
+.gitignore
+bin/
+dist/
+data/
+*.log
+config.yaml

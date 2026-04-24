@@ -1,0 +1,123 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  proxy: ""
+  body_limit_mb: 2048
+  staging_dir: "/app/data/staging"
+  result_retention: false
+  auth:
+    enabled: true
+    user_agent_prefix: "MoeInternal/"
+    bearer_token: "${MOE_ASSET_TOKEN}"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+logging:
+  level: "INFO"
+  format: "json"
+  file: ""
+  access:
+    enabled: false
+    format: "[${time}] ${status} - ${method} ${path} ${latency}\n"
+    file: ""
+
+execution:
+  timeout_seconds: 21600
+  allow_cancel: true
+  batch_save_size: 100
+  lease_ttl_seconds: 300
+  heartbeat_seconds: 30
+  retry:
+    attempts: 4
+    initial_backoff_ms: 1000
+    max_backoff_ms: 4000
+
+storage:
+  upload_concurrency: 16
+  providers:
+    - kind: s3
+      endpoint: "storage.example.com"
+      tls: true
+      bucket: "sekai-{region}-assets"
+      prefix: ""
+      path_style: true
+      region: "us-east-1"
+      public_read: false
+      timeout:
+        connect_seconds: 30
+        read_seconds: 300
+        operation_attempt_seconds: 900
+        operation_seconds: 0
+        stalled_stream_grace_seconds: 60
+      access_key: "${S3_ACCESS_KEY}"
+      secret_key: "${S3_SECRET_KEY}"
+      dedupe:
+        enabled: true
+        index_key: ".moe-asset-index/{region}.files.json"
+        alias_duplicates: false
+        verify_remote: true
+        flush_batch_size: 50
+
+git_sync:
+  chart_hashes:
+    enabled: false
+    repository_dir: ""
+    username: ""
+    email: ""
+    password: ""
+
+regions:
+  jp:
+    enabled: true
+    provider:
+      kind: colorful_palette
+      current_version_url: "https://raw.githubusercontent.com/Team-Haruki/haruki-sekai-master/main/versions/current_version.json"
+      asset_info_url_template: "https://{env}-{hash}-assetbundle-info.sekai.colorfulpalette.org/api/version/{asset_version}/{asset_hash}/os/ios"
+      asset_bundle_url_template: "https://{env}-{hash}-assetbundle.sekai.colorfulpalette.org/{asset_version}/{asset_hash}/ios/{bundle_path}"
+      profile: "production"
+      profile_hashes:
+        production: "cf2d2388"
+      required_cookies: true
+    crypto:
+      aes_key_hex: "6732666343305a637a4e394d544a3631"
+      aes_iv_hex: "6d737833495630693958453575595a31"
+    runtime:
+      unity_version: "2022.3.21f1"
+    paths:
+      asset_save_dir: "/app/data/jp-assets"
+      downloaded_asset_record_file: "/app/data/jp-assets/downloaded_assets.json"
+    filters:
+      start_app: [".*"]
+      on_demand: [".*"]
+      skip: []
+      priority: [".*"]
+    export:
+      by_category: false
+      keep_types: [audio, image, json]
+      keep_extensions: []
+      remove_filtered_files: true
+      usm:
+        export: false
+        decode: false
+      acb:
+        export: true
+        decode: true
+      hca:
+        decode: true
+      images:
+        convert_to_webp: true
+        remove_png: false
+      video:
+        convert_to_mp4: false
+        direct_usm_to_mp4_with_ffmpeg: false
+        remove_m2v: true
+      audio:
+        convert_to_mp3: true
+        convert_to_flac: false
+        remove_wav: true
+    upload:
+      enabled: true
+      remove_local_after_upload: true
+      remove_empty_dirs_after_upload: true
