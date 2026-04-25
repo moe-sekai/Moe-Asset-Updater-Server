@@ -113,6 +113,11 @@ func (s *Server) RegisterRoutes(app *fiber.App) {
 	api.Post("/tasks/:task_id/fail", s.failHandler)
 	api.Post("/tasks/:task_id/result", s.resultHandler)
 
+	// Admin endpoints for auditing and requeuing.
+	admin := api.Group("/admin")
+	admin.Post("/s3/audit", s.auditS3Handler)
+	admin.Post("/requeue", s.requeueHandler)
+
 	// Backward-compatible endpoint used by the old monolith.
 	app.Post("/update_asset", s.authMiddleware, s.createJobHandler)
 }
@@ -277,10 +282,20 @@ func (s *Server) resultHandler(c fiber.Ctx) error {
 		_ = s.failTaskAndLog(taskID, "", err.Error(), "结果清单校验失败")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "manifest verification failed", "error": err.Error()})
 	}
+	if err := validateExpectedOutputs(manifest, payload.Export); err != nil {
+		_ = s.failTaskAndLog(taskID, "", err.Error(), "期望产物校验失败")
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "expected output validation failed", "error": err.Error()})
+	}
 	if err := s.scheduler.MarkUploadingS3(taskID); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
-	if err := s.uploader.UploadManifestFiles(context.Background(), extractDir, manifest.Region, manifest.Files); err != nil {
+	if err := s.uploader.UploadManifestFiles(context.Background(), extractDir, manifest.Region, manifest.Files, storage.UploadMeta{
+		TaskID:     manifest.TaskID,
+		JobID:      manifest.JobID,
+		ClientID:   s.scheduler.TaskClientID(taskID),
+		BundlePath: manifest.BundlePath,
+		BundleHash: manifest.BundleHash,
+	}); err != nil {
 		_ = s.failTaskAndLog(taskID, "", err.Error(), "S3上传失败")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to upload result to storage", "error": err.Error()})
 	}
@@ -462,4 +477,120 @@ func (s *Server) cleanupStaging(dir string) {
 		return
 	}
 	_ = os.RemoveAll(dir)
+}
+
+// validateExpectedOutputs checks that the manifest contains expected output
+// files based on the export options. This catches cases where ffmpeg silently
+// fails and the client uploads results without the expected converted files.
+func validateExpectedOutputs(manifest protocol.TaskResultManifest, export protocol.ExportOptions) error {
+	var hasWav, hasMP3, hasFLAC, hasM2V, hasMP4, hasPNG, hasWebP bool
+	for _, f := range manifest.Files {
+		ext := strings.ToLower(filepath.Ext(f.Path))
+		switch ext {
+		case ".wav":
+			hasWav = true
+		case ".mp3":
+			hasMP3 = true
+		case ".flac":
+			hasFLAC = true
+		case ".m2v":
+			hasM2V = true
+		case ".mp4":
+			hasMP4 = true
+		case ".png":
+			hasPNG = true
+		case ".webp":
+			hasWebP = true
+		}
+	}
+
+	// Audio: if WAV→MP3 conversion is enabled but we see .wav without .mp3, something went wrong.
+	if export.ConvertAudioToMP3 && export.ExportACBFiles && export.DecodeACBFiles {
+		if hasWav && !hasMP3 {
+			return fmt.Errorf("export requires mp3 conversion but result contains .wav without any .mp3 files")
+		}
+	}
+	// Audio: if WAV→FLAC conversion is enabled but we see .wav without .flac.
+	if export.ConvertWavToFLAC && export.ExportACBFiles && export.DecodeACBFiles {
+		if hasWav && !hasFLAC {
+			return fmt.Errorf("export requires flac conversion but result contains .wav without any .flac files")
+		}
+	}
+	// Audio: if remove_wav is enabled but .wav files are still present (and conversion was requested).
+	if export.RemoveWav && (export.ConvertAudioToMP3 || export.ConvertWavToFLAC) {
+		if hasWav {
+			return fmt.Errorf("export requires wav removal but result still contains .wav files")
+		}
+	}
+	// Video: if M2V→MP4 conversion is enabled but we see .m2v without .mp4.
+	if export.ConvertVideoToMP4 {
+		if hasM2V && !hasMP4 {
+			return fmt.Errorf("export requires mp4 conversion but result contains .m2v without any .mp4 files")
+		}
+	}
+	// Images: if PNG→WebP conversion is enabled with remove_png, but .png files remain without .webp.
+	if export.ConvertPhotoToWebP && export.RemovePNG {
+		if hasPNG && !hasWebP {
+			return fmt.Errorf("export requires webp conversion with png removal but result contains .png without any .webp files")
+		}
+	}
+	return nil
+}
+
+// --- Admin handlers ---
+
+func (s *Server) auditS3Handler(c fiber.Ctx) error {
+	var req protocol.AuditS3Request
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "Invalid request payload", "error": err.Error()})
+	}
+	if req.Region == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "region is required"})
+	}
+	resp, err := s.uploader.AuditS3(context.Background(), req)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "S3 audit failed", "error": err.Error()})
+	}
+	return c.JSON(resp)
+}
+
+func (s *Server) requeueHandler(c fiber.Ctx) error {
+	var req protocol.RequeueRequest
+	if err := c.Bind().Body(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "Invalid request payload", "error": err.Error()})
+	}
+	if req.Region == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "region is required"})
+	}
+	if len(req.BundlePaths) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "bundle_paths is required"})
+	}
+
+	resp := protocol.RequeueResponse{}
+
+	// Step 1: Clear downloaded asset records for the specified bundles.
+	if req.ClearRecord {
+		removed, err := s.records.RemoveBundles(req.Region, req.BundlePaths)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to remove records", "error": err.Error()})
+		}
+		resp.RecordsRemoved = removed
+	}
+
+	// Step 2: Optionally delete S3 objects.
+	if req.DeleteS3Objects && len(req.S3KeysToDelete) > 0 {
+		deleted, err := s.uploader.DeleteS3Objects(context.Background(), req.Region, req.S3KeysToDelete)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"message":         "partial S3 deletion",
+				"error":           err.Error(),
+				"records_removed": resp.RecordsRemoved,
+				"s3_deleted":      deleted,
+			})
+		}
+		resp.S3Deleted = deleted
+	}
+
+	resp.Message = fmt.Sprintf("removed %d records, deleted %d S3 objects; create a new job for region %s to re-process these bundles", resp.RecordsRemoved, resp.S3Deleted, req.Region)
+	return c.JSON(resp)
 }

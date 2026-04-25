@@ -386,6 +386,17 @@ func (m *Manager) TaskPayload(taskID string) (protocol.TaskPayload, bool) {
 	return task.payload, true
 }
 
+// TaskClientID returns the client ID currently leasing the given task.
+func (m *Manager) TaskClientID(taskID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return ""
+	}
+	return task.clientID
+}
+
 func (m *Manager) failTaskLocked(task *taskState, message string, now time.Time) {
 	task.lastError = message
 	task.clientID = ""

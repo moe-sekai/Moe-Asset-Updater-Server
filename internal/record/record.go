@@ -39,6 +39,32 @@ func (m *Manager) Mark(region protocol.Region, bundlePath string, bundleHash str
 	return m.saveUnlocked(region, records)
 }
 
+// RemoveBundles deletes the given bundle paths from the downloaded asset record
+// and returns the number of entries actually removed.
+func (m *Manager) RemoveBundles(region protocol.Region, bundlePaths []string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	records, err := m.loadUnlocked(region)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, bp := range bundlePaths {
+		if _, ok := records[bp]; ok {
+			delete(records, bp)
+			removed++
+		}
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	if err := m.saveUnlocked(region, records); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
 func (m *Manager) loadUnlocked(region protocol.Region) (map[string]string, error) {
 	path, err := m.recordPath(region)
 	if err != nil {

@@ -201,3 +201,42 @@ type ClientSnapshot struct {
 	ActiveTaskIDs []string          `json:"active_task_ids,omitempty"`
 	LastSeen      time.Time         `json:"last_seen"`
 }
+
+// Admin API types
+
+type AuditS3Request struct {
+	Region         Region   `json:"region"`
+	Extensions     []string `json:"extensions"`
+	ModifiedAfter  string   `json:"modified_after,omitempty"`
+	ModifiedBefore string   `json:"modified_before,omitempty"`
+	MaxSizeBytes   int64    `json:"max_size_bytes,omitempty"`
+	MinSizeBytes   int64    `json:"min_size_bytes,omitempty"`
+	PrefixFilter   string   `json:"prefix_filter,omitempty"`
+	Limit          int      `json:"limit,omitempty"`
+}
+
+type AuditS3Object struct {
+	Key             string    `json:"key"`
+	Size            int64     `json:"size"`
+	LastModified    time.Time `json:"last_modified"`
+	SuspectedBundle string    `json:"suspected_bundle,omitempty"`
+}
+
+type AuditS3Response struct {
+	Total   int             `json:"total"`
+	Objects []AuditS3Object `json:"objects"`
+}
+
+type RequeueRequest struct {
+	Region           Region   `json:"region"`
+	BundlePaths      []string `json:"bundle_paths"`
+	ClearRecord      bool     `json:"clear_record"`
+	DeleteS3Objects  bool     `json:"delete_s3_objects"`
+	S3KeysToDelete   []string `json:"s3_keys_to_delete,omitempty"`
+}
+
+type RequeueResponse struct {
+	RecordsRemoved int    `json:"records_removed"`
+	S3Deleted      int    `json:"s3_deleted"`
+	Message        string `json:"message"`
+}
