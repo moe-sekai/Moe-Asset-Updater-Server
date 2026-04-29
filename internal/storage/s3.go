@@ -113,6 +113,9 @@ func uploadOneWithRetry(ctx context.Context, client *s3.Client, provider config.
 	for attempt := 0; attempt < defaultUploadRetries; attempt++ {
 		if attempt > 0 {
 			backoff := defaultRetryBaseBackoff * time.Duration(1<<(attempt-1))
+			if backoff > 4*time.Second {
+				backoff = 4 * time.Second
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -122,6 +125,10 @@ func uploadOneWithRetry(ctx context.Context, client *s3.Client, provider config.
 		lastErr = uploadOne(ctx, client, provider, bucket, baseDir, region, resultFile, meta)
 		if lastErr == nil {
 			return nil
+		}
+		// If context is already cancelled, don't retry.
+		if ctx.Err() != nil {
+			return lastErr
 		}
 	}
 	return lastErr
@@ -140,11 +147,17 @@ func uploadOne(ctx context.Context, client *s3.Client, provider config.StoragePr
 			Key:    aws.String(remotePath),
 		})
 		if err == nil && head.ContentLength != nil && *head.ContentLength == resultFile.Size {
-			// Also compare SHA256 from object metadata if available.
-			if sha, ok := head.Metadata["sha256"]; ok && strings.EqualFold(sha, resultFile.SHA256) {
+			// If the remote object has SHA256 metadata, compare it.
+			// If metadata is absent (legacy upload), trust size match alone.
+			if sha, ok := head.Metadata["sha256"]; ok {
+				if strings.EqualFold(sha, resultFile.SHA256) {
+					return nil
+				}
+				// SHA256 mismatch — fall through to re-upload.
+			} else {
+				// No SHA256 metadata (legacy object) — size match is sufficient.
 				return nil
 			}
-			// Size matches but SHA256 missing or mismatched — re-upload to fix.
 		}
 	}
 

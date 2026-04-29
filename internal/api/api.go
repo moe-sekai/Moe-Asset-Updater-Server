@@ -483,58 +483,63 @@ func (s *Server) cleanupStaging(dir string) {
 // files based on the export options. This catches cases where ffmpeg silently
 // fails and the client uploads results without the expected converted files.
 func validateExpectedOutputs(manifest protocol.TaskResultManifest, export protocol.ExportOptions) error {
-	var hasWav, hasMP3, hasFLAC, hasM2V, hasMP4, hasPNG, hasWebP bool
+	counts := make(map[string]int)
+	samples := make(map[string][]string)
 	for _, f := range manifest.Files {
 		ext := strings.ToLower(filepath.Ext(f.Path))
 		switch ext {
-		case ".wav":
-			hasWav = true
-		case ".mp3":
-			hasMP3 = true
-		case ".flac":
-			hasFLAC = true
-		case ".m2v":
-			hasM2V = true
-		case ".mp4":
-			hasMP4 = true
-		case ".png":
-			hasPNG = true
-		case ".webp":
-			hasWebP = true
+		case ".wav", ".mp3", ".flac", ".m2v", ".mp4", ".png", ".webp":
+			counts[ext]++
+			if len(samples[ext]) < 3 {
+				samples[ext] = append(samples[ext], f.Path)
+			}
 		}
 	}
+	has := func(ext string) bool { return counts[ext] > 0 }
 
 	// Audio: if WAV→MP3 conversion is enabled but we see .wav without .mp3, something went wrong.
 	if export.ConvertAudioToMP3 && export.ExportACBFiles && export.DecodeACBFiles {
-		if hasWav && !hasMP3 {
-			return fmt.Errorf("export requires mp3 conversion but result contains .wav without any .mp3 files")
+		if has(".wav") && !has(".mp3") {
+			return fmt.Errorf("export requires mp3 conversion but result contains .wav without any .mp3 files (%s)", outputExtSummary(counts, samples, ".wav", ".mp3"))
 		}
 	}
 	// Audio: if WAV→FLAC conversion is enabled but we see .wav without .flac.
 	if export.ConvertWavToFLAC && export.ExportACBFiles && export.DecodeACBFiles {
-		if hasWav && !hasFLAC {
-			return fmt.Errorf("export requires flac conversion but result contains .wav without any .flac files")
+		if has(".wav") && !has(".flac") {
+			return fmt.Errorf("export requires flac conversion but result contains .wav without any .flac files (%s)", outputExtSummary(counts, samples, ".wav", ".flac"))
 		}
 	}
 	// Audio: if remove_wav is enabled but .wav files are still present (and conversion was requested).
 	if export.RemoveWav && (export.ConvertAudioToMP3 || export.ConvertWavToFLAC) {
-		if hasWav {
-			return fmt.Errorf("export requires wav removal but result still contains .wav files")
+		if has(".wav") {
+			return fmt.Errorf("export requires wav removal but result still contains .wav files (%s)", outputExtSummary(counts, samples, ".wav", ".mp3", ".flac"))
 		}
 	}
 	// Video: if M2V→MP4 conversion is enabled but we see .m2v without .mp4.
 	if export.ConvertVideoToMP4 {
-		if hasM2V && !hasMP4 {
-			return fmt.Errorf("export requires mp4 conversion but result contains .m2v without any .mp4 files")
+		if has(".m2v") && !has(".mp4") {
+			return fmt.Errorf("export requires mp4 conversion but result contains .m2v without any .mp4 files (%s)", outputExtSummary(counts, samples, ".m2v", ".mp4"))
 		}
 	}
 	// Images: if PNG→WebP conversion is enabled with remove_png, but .png files remain without .webp.
 	if export.ConvertPhotoToWebP && export.RemovePNG {
-		if hasPNG && !hasWebP {
-			return fmt.Errorf("export requires webp conversion with png removal but result contains .png without any .webp files")
+		if has(".png") && !has(".webp") {
+			return fmt.Errorf("export requires webp conversion with png removal but result contains .png without any .webp files (%s)", outputExtSummary(counts, samples, ".png", ".webp"))
 		}
 	}
 	return nil
+}
+
+func outputExtSummary(counts map[string]int, samples map[string][]string, exts ...string) string {
+	parts := make([]string, 0, len(exts)*2)
+	for _, ext := range exts {
+		label := strings.TrimPrefix(ext, ".")
+		parts = append(parts, fmt.Sprintf("%s=%d", label, counts[ext]))
+		if len(samples[ext]) > 0 {
+			parts = append(parts, fmt.Sprintf("%s_samples=%v", label, samples[ext]))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // --- Admin handlers ---
