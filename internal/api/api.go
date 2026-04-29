@@ -17,6 +17,7 @@ import (
 
 	"moe-asset-server/internal/catalog"
 	"moe-asset-server/internal/config"
+	"moe-asset-server/internal/gitwatch"
 	harukiLogger "moe-asset-server/internal/logger"
 	"moe-asset-server/internal/protocol"
 	"moe-asset-server/internal/record"
@@ -35,6 +36,11 @@ type Server struct {
 	uploader  *storage.Uploader
 }
 
+var (
+	errLoadDownloadedAssetRecord = errors.New("load downloaded asset record")
+	errBuildAssetTasks           = errors.New("build asset tasks")
+)
+
 func New(cfg *config.Config, logger *harukiLogger.Logger) *Server {
 	if logger == nil {
 		logger = harukiLogger.NewLogger("ServerAPI", cfg.Logging.Level, nil)
@@ -47,6 +53,48 @@ func New(cfg *config.Config, logger *harukiLogger.Logger) *Server {
 		records:   record.NewManager(cfg),
 		uploader:  storage.NewUploader(cfg),
 	}
+}
+
+func (s *Server) StartGitHashWatcher(ctx context.Context) {
+	watchCfg := s.cfg.GitSync.AssetHashWatch
+	if !watchCfg.Enabled {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	targets := make([]config.AssetHashWatchTargetConfig, 0, len(watchCfg.Targets))
+	for _, target := range watchCfg.Targets {
+		if target.Region == "" || target.URL == "" {
+			s.logger.Warnf("GitHub哈希监控目标配置不完整，已跳过 region=%s url=%s", target.Region, target.URL)
+			continue
+		}
+		regionCfg, ok := s.cfg.Regions[target.Region]
+		if !ok {
+			s.logger.Warnf("GitHub哈希监控目标 region=%s 未在配置中找到，已跳过", target.Region)
+			continue
+		}
+		if !regionCfg.Enabled {
+			s.logger.Warnf("GitHub哈希监控目标 region=%s 已禁用，已跳过", target.Region)
+			continue
+		}
+		targets = append(targets, target)
+	}
+	if len(targets) == 0 {
+		s.logger.Warnf("GitHub哈希监控已启用但没有可用目标")
+		return
+	}
+	watchCfg.Targets = targets
+
+	watcher, err := gitwatch.New(watchCfg, s.logger, func(ctx context.Context, region protocol.Region, oldHash string, newHash string) (protocol.JobSnapshot, error) {
+		return s.createAssetJob(ctx, protocol.JobRequest{Server: region}, "GitHub哈希变化创建任务")
+	})
+	if err != nil {
+		s.logger.Errorf("GitHub哈希监控启动失败: %v", err)
+		return
+	}
+	watcher.Start(ctx)
 }
 
 func (s *Server) logJobProgress(event string, job protocol.JobSnapshot) {
@@ -139,6 +187,20 @@ func (s *Server) authMiddleware(c fiber.Ctx) error {
 	return c.Next()
 }
 
+func (s *Server) createAssetJob(ctx context.Context, req protocol.JobRequest, event string) (protocol.JobSnapshot, error) {
+	downloaded, err := s.records.Load(req.Server)
+	if err != nil {
+		return protocol.JobSnapshot{}, fmt.Errorf("%w: %v", errLoadDownloadedAssetRecord, err)
+	}
+	resolvedReq, tasks, err := s.builder.BuildTasks(ctx, req, downloaded)
+	if err != nil {
+		return protocol.JobSnapshot{}, fmt.Errorf("%w: %v", errBuildAssetTasks, err)
+	}
+	job := s.scheduler.CreateJob(resolvedReq, tasks)
+	s.logJobProgress(event, job)
+	return job, nil
+}
+
 func (s *Server) createJobHandler(c fiber.Ctx) error {
 	var req protocol.JobRequest
 	if err := c.Bind().Body(&req); err != nil {
@@ -148,16 +210,13 @@ func (s *Server) createJobHandler(c fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "server is required"})
 	}
 
-	downloaded, err := s.records.Load(req.Server)
+	job, err := s.createAssetJob(context.Background(), req, "创建任务")
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to load downloaded asset record", "error": err.Error()})
-	}
-	resolvedReq, tasks, err := s.builder.BuildTasks(context.Background(), req, downloaded)
-	if err != nil {
+		if errors.Is(err, errLoadDownloadedAssetRecord) {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"message": "failed to load downloaded asset record", "error": err.Error()})
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": "failed to create asset job", "error": err.Error()})
 	}
-	job := s.scheduler.CreateJob(resolvedReq, tasks)
-	s.logJobProgress("创建任务", job)
 	return c.Status(fiber.StatusOK).JSON(protocol.CreateJobResponse{Message: "Asset updater started running", Job: job})
 }
 

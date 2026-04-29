@@ -108,7 +108,21 @@ type StorageDedupeConfig struct {
 }
 
 type GitSyncConfig struct {
-	ChartHashes ChartHashesConfig `yaml:"chart_hashes"`
+	AssetHashWatch AssetHashWatchConfig `yaml:"asset_hash_watch"`
+	ChartHashes    ChartHashesConfig    `yaml:"chart_hashes"`
+}
+
+type AssetHashWatchConfig struct {
+	Enabled         bool                         `yaml:"enabled"`
+	IntervalSeconds int                          `yaml:"interval_seconds"`
+	GitHubToken     string                       `yaml:"github_token"`
+	StateFile       string                       `yaml:"state_file"`
+	Targets         []AssetHashWatchTargetConfig `yaml:"targets"`
+}
+
+type AssetHashWatchTargetConfig struct {
+	Region protocol.Region `yaml:"region"`
+	URL    string          `yaml:"url"`
 }
 
 type ChartHashesConfig struct {
@@ -286,6 +300,27 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Storage.UploadConcurrency == 0 {
 		c.Storage.UploadConcurrency = 16
+	}
+	if c.GitSync.AssetHashWatch.IntervalSeconds <= 0 {
+		c.GitSync.AssetHashWatch.IntervalSeconds = 60
+	}
+	if c.GitSync.AssetHashWatch.GitHubToken == "" {
+		c.GitSync.AssetHashWatch.GitHubToken = os.Getenv("GITHUB_TOKEN")
+	}
+	if c.GitSync.AssetHashWatch.StateFile == "" {
+		c.GitSync.AssetHashWatch.StateFile = "./data/github_asset_hash_watch.json"
+	}
+	if len(c.GitSync.AssetHashWatch.Targets) == 0 {
+		c.GitSync.AssetHashWatch.Targets = []AssetHashWatchTargetConfig{
+			{
+				Region: protocol.RegionCN,
+				URL:    "https://github.com/Team-Haruki/haruki-sekai-sc-master/tree/main/master",
+			},
+			{
+				Region: protocol.RegionJP,
+				URL:    "https://github.com/Team-Haruki/haruki-sekai-master/tree/main/master",
+			},
+		}
 	}
 	if c.Regions == nil {
 		c.Regions = make(map[protocol.Region]RegionConfig)

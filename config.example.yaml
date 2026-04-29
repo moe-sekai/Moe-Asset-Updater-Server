@@ -61,6 +61,16 @@ storage:
         flush_batch_size: 50
 
 git_sync:
+  asset_hash_watch:
+    enabled: true
+    interval_seconds: 60
+    github_token: "${GITHUB_TOKEN}"
+    state_file: "/app/data/github_asset_hash_watch.json"
+    targets:
+      - region: cn
+        url: "https://github.com/Team-Haruki/haruki-sekai-sc-master/tree/main/master"
+      - region: jp
+        url: "https://github.com/Team-Haruki/haruki-sekai-master/tree/main/master"
   chart_hashes:
     enabled: false
     repository_dir: ""

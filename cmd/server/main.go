@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -63,7 +64,9 @@ func main() {
 		app.Use(logger.New(logCfg))
 	}
 
-	api.New(cfg, mainLogger).RegisterRoutes(app)
+	server := api.New(cfg, mainLogger)
+	server.RegisterRoutes(app)
+	server.StartGitHashWatcher(context.Background())
 
 	listenCfg := fiber.ListenConfig{DisableStartupMessage: true}
 	serverType := "HTTP"
