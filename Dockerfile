@@ -20,5 +20,5 @@ COPY config.example.yaml /app/config.example.yaml
 RUN mkdir -p /app/data/staging
 ENV TZ=Asia/Shanghai \
     MOE_ASSET_SERVER_CONFIG=/app/config.yaml
-EXPOSE 8080
+EXPOSE 8080 9090
 CMD ["/app/moe-asset-server", "-config", "/app/config.yaml"]

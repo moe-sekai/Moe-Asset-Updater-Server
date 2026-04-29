@@ -66,6 +66,7 @@ func main() {
 
 	server := api.New(cfg, mainLogger)
 	server.RegisterRoutes(app)
+	server.StartTCPServer(context.Background())
 	server.StartGitHashWatcher(context.Background())
 
 	listenCfg := fiber.ListenConfig{DisableStartupMessage: true}

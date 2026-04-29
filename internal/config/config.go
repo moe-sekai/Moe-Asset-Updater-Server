@@ -27,8 +27,19 @@ type ServerConfig struct {
 	BodyLimitMB     int        `yaml:"body_limit_mb"`
 	Auth            AuthConfig `yaml:"auth"`
 	TLS             TLSConfig  `yaml:"tls"`
+	TCP             TCPConfig  `yaml:"tcp"`
 	StagingDir      string     `yaml:"staging_dir"`
 	ResultRetention bool       `yaml:"result_retention"`
+}
+
+type TCPConfig struct {
+	Enabled             bool   `yaml:"enabled"`
+	Host                string `yaml:"host"`
+	Port                int    `yaml:"port"`
+	MaxConnections      int    `yaml:"max_connections"`
+	ReadTimeoutSeconds  int    `yaml:"read_timeout_seconds"`
+	WriteTimeoutSeconds int    `yaml:"write_timeout_seconds"`
+	LeasePollIntervalMS int    `yaml:"lease_poll_interval_ms"`
 }
 
 type AuthConfig struct {
@@ -274,6 +285,24 @@ func (c *Config) applyDefaults() {
 	if c.Server.BodyLimitMB == 0 {
 		c.Server.BodyLimitMB = 2048
 	}
+	if c.Server.TCP.Host == "" {
+		c.Server.TCP.Host = "0.0.0.0"
+	}
+	if c.Server.TCP.Port == 0 {
+		c.Server.TCP.Port = 9090
+	}
+	if c.Server.TCP.MaxConnections == 0 {
+		c.Server.TCP.MaxConnections = 100
+	}
+	if c.Server.TCP.ReadTimeoutSeconds == 0 {
+		c.Server.TCP.ReadTimeoutSeconds = 90
+	}
+	if c.Server.TCP.WriteTimeoutSeconds == 0 {
+		c.Server.TCP.WriteTimeoutSeconds = 30
+	}
+	if c.Server.TCP.LeasePollIntervalMS == 0 {
+		c.Server.TCP.LeasePollIntervalMS = 500
+	}
 	if c.Server.StagingDir == "" {
 		c.Server.StagingDir = "./data/staging"
 	}
@@ -329,6 +358,17 @@ func (c *Config) applyDefaults() {
 
 func (c Config) ListenAddress() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+}
+
+func (t TCPConfig) ListenAddress() string {
+	return fmt.Sprintf("%s:%d", t.Host, t.Port)
+}
+
+func (t TCPConfig) LeasePollInterval() time.Duration {
+	if t.LeasePollIntervalMS <= 0 {
+		return 500 * time.Millisecond
+	}
+	return time.Duration(t.LeasePollIntervalMS) * time.Millisecond
 }
 
 func (c Config) LeaseTTL() time.Duration {

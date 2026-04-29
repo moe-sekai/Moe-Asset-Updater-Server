@@ -13,6 +13,14 @@ server:
     enabled: false
     cert_file: ""
     key_file: ""
+  tcp:
+    enabled: false
+    host: "0.0.0.0"
+    port: 9090
+    max_connections: 100
+    read_timeout_seconds: 90
+    write_timeout_seconds: 30
+    lease_poll_interval_ms: 500
 
 logging:
   level: "INFO"

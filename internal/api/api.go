@@ -23,17 +23,19 @@ import (
 	"moe-asset-server/internal/record"
 	"moe-asset-server/internal/scheduler"
 	"moe-asset-server/internal/storage"
+	"moe-asset-server/internal/tcpserver"
 
 	"github.com/gofiber/fiber/v3"
 )
 
 type Server struct {
-	cfg       *config.Config
-	logger    *harukiLogger.Logger
-	builder   *catalog.Builder
-	scheduler *scheduler.Manager
-	records   *record.Manager
-	uploader  *storage.Uploader
+	cfg          *config.Config
+	logger       *harukiLogger.Logger
+	builder      *catalog.Builder
+	scheduler    *scheduler.Manager
+	records      *record.Manager
+	uploader     *storage.Uploader
+	taskNotifier func()
 }
 
 var (
@@ -52,6 +54,28 @@ func New(cfg *config.Config, logger *harukiLogger.Logger) *Server {
 		scheduler: scheduler.NewManager(cfg),
 		records:   record.NewManager(cfg),
 		uploader:  storage.NewUploader(cfg),
+	}
+}
+
+func (s *Server) StartTCPServer(ctx context.Context) {
+	if !s.cfg.Server.TCP.Enabled {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	server := tcpserver.New(s.cfg, s.logger, s.scheduler)
+	s.taskNotifier = server.Notify
+	go func() {
+		if err := server.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.logger.Errorf("TCP task server stopped: %v", err)
+		}
+	}()
+}
+
+func (s *Server) notifyTasksAvailable() {
+	if s.taskNotifier != nil {
+		s.taskNotifier()
 	}
 }
 
@@ -136,6 +160,7 @@ func (s *Server) failTaskAndLog(taskID string, clientID string, message string, 
 	if err := s.scheduler.Fail(taskID, clientID, message); err != nil {
 		return err
 	}
+	s.notifyTasksAvailable()
 	if payload.JobID != "" {
 		s.logJobProgressByID(event, payload.JobID)
 	}
@@ -197,6 +222,7 @@ func (s *Server) createAssetJob(ctx context.Context, req protocol.JobRequest, ev
 		return protocol.JobSnapshot{}, fmt.Errorf("%w: %v", errBuildAssetTasks, err)
 	}
 	job := s.scheduler.CreateJob(resolvedReq, tasks)
+	s.notifyTasksAvailable()
 	s.logJobProgress(event, job)
 	return job, nil
 }
@@ -366,6 +392,7 @@ func (s *Server) resultHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"message": err.Error()})
 	}
+	s.notifyTasksAvailable()
 	s.logJobProgressByID("任务完成", completed.JobID)
 	return c.JSON(fiber.Map{"ok": true, "task_id": completed.TaskID})
 }
