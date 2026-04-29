@@ -126,7 +126,7 @@ func (s *Server) logJobProgress(event string, job protocol.JobSnapshot) {
 	jobCompleted := job.Succeeded + job.Failed + job.Cancelled
 	allCompleted := overview.Succeeded + overview.Failed + overview.Cancelled
 	s.logger.Infof(
-		"[%s] job=%s region=%s 总任务=%d 已完成=%d 成功=%d 失败=%d 取消=%d 运行中=%d 排队=%d | 全局任务=%d 全局已完成=%d 全局成功=%d 全局失败=%d 全局取消=%d 全局运行中=%d 全局排队=%d",
+		"[%s] job=%s region=%s 总任务=%d 已完成=%d 成功=%d 失败=%d 取消=%d 运行中=%d 排队=%d 延迟=%d | 全局任务=%d 全局已完成=%d 全局成功=%d 全局失败=%d 全局取消=%d 全局运行中=%d 全局排队=%d 全局延迟=%d",
 		event,
 		job.ID,
 		job.Region,
@@ -137,6 +137,7 @@ func (s *Server) logJobProgress(event string, job protocol.JobSnapshot) {
 		job.Cancelled,
 		job.Running,
 		job.Queued,
+		job.Delayed,
 		overview.Total,
 		allCompleted,
 		overview.Succeeded,
@@ -144,6 +145,7 @@ func (s *Server) logJobProgress(event string, job protocol.JobSnapshot) {
 		overview.Cancelled,
 		overview.Running,
 		overview.Queued,
+		overview.Delayed,
 	)
 }
 
@@ -345,6 +347,9 @@ func (s *Server) resultHandler(c fiber.Ctx) error {
 	payload, ok := s.scheduler.TaskPayload(taskID)
 	if !ok {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"message": "task not found"})
+	}
+	if payload.Delayed {
+		s.logger.Infof("接收延迟任务结果 task=%s bundle=%s estimated_size=%d", taskID, payload.BundlePath, payload.EstimatedSizeBytes)
 	}
 	manifest, archivePath, stagingDir, err := s.saveResultUpload(c, taskID)
 	if err != nil {

@@ -41,6 +41,14 @@ execution:
     attempts: 4
     initial_backoff_ms: 1000
     max_backoff_ms: 4000
+  delayed:
+    # Large unpack directories are held until all normal tasks finish, then leased slowly.
+    enabled: true
+    threshold_mb: 50
+    max_running: 1
+    max_per_client: 1
+    # Optional regexes for paths whose extracted result is known to explode in size.
+    path_patterns: []
 
 storage:
   upload_concurrency: 16

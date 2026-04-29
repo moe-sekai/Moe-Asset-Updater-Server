@@ -346,11 +346,13 @@ func (b *Builder) buildDownloadList(region protocol.Region, regionCfg config.Reg
 		}
 		downloadPath := getDownloadPath(region, regionCfg.Provider.Kind, bundleName, bundleInfo)
 		tasks = append(tasks, downloadTask{
-			downloadPath: downloadPath,
-			bundlePath:   bundleName,
-			bundleHash:   bundleHash,
-			category:     bundleInfo.Category,
-			priority:     getDownloadPriority(bundleName, regionCfg.Filters.Priority),
+			downloadPath:       downloadPath,
+			bundlePath:         bundleName,
+			bundleHash:         bundleHash,
+			category:           bundleInfo.Category,
+			priority:           getDownloadPriority(bundleName, regionCfg.Filters.Priority),
+			estimatedSizeBytes: bundleInfo.FileSize,
+			delayed:            b.shouldDelayBundle(bundleName, bundleInfo.FileSize),
 		})
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
@@ -363,17 +365,40 @@ func (b *Builder) buildDownloadList(region protocol.Region, regionCfg config.Reg
 	payloads := make([]protocol.TaskPayload, 0, len(tasks))
 	for _, task := range tasks {
 		payloads = append(payloads, protocol.TaskPayload{
-			Region:       region,
-			BundlePath:   task.bundlePath,
-			DownloadPath: task.downloadPath,
-			BundleHash:   task.bundleHash,
-			Category:     task.category,
-			DownloadURL:  buildAssetBundleURL(region, regionCfg, task.downloadPath, assetVersion, assetHash) + timeArg(),
-			Headers:      taskHeaders(regionCfg, cookie),
-			Export:       regionCfg.ExportOptions(),
+			Region:             region,
+			BundlePath:         task.bundlePath,
+			DownloadPath:       task.downloadPath,
+			BundleHash:         task.bundleHash,
+			Category:           task.category,
+			DownloadURL:        buildAssetBundleURL(region, regionCfg, task.downloadPath, assetVersion, assetHash) + timeArg(),
+			Headers:            taskHeaders(regionCfg, cookie),
+			Export:             regionCfg.ExportOptions(),
+			EstimatedSizeBytes: task.estimatedSizeBytes,
+			Delayed:            task.delayed,
 		})
 	}
 	return payloads
+}
+
+func (b *Builder) shouldDelayBundle(bundleName string, estimatedSizeBytes int64) bool {
+	delayed := b.cfg.Execution.Delayed
+	if !delayed.Enabled {
+		return false
+	}
+	thresholdMB := delayed.ThresholdMB
+	if thresholdMB <= 0 {
+		thresholdMB = 50
+	}
+	thresholdBytes := int64(thresholdMB) * 1024 * 1024
+	if estimatedSizeBytes >= thresholdBytes {
+		return true
+	}
+	for _, pattern := range delayed.PathPatterns {
+		if regexpMatch(pattern, bundleName) {
+			return true
+		}
+	}
+	return false
 }
 
 func taskHeaders(regionCfg config.RegionConfig, cookie string) map[string]string {

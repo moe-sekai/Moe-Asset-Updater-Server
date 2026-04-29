@@ -34,6 +34,7 @@ type TaskStatus string
 
 const (
 	TaskStatusQueued          TaskStatus = "queued"
+	TaskStatusDelayed         TaskStatus = "delayed"
 	TaskStatusLeased          TaskStatus = "leased"
 	TaskStatusRunning         TaskStatus = "running"
 	TaskStatusUploadingResult TaskStatus = "uploading_result"
@@ -87,16 +88,18 @@ type ExportOptions struct {
 }
 
 type TaskPayload struct {
-	TaskID       string            `json:"task_id"`
-	JobID        string            `json:"job_id"`
-	Region       Region            `json:"region"`
-	BundlePath   string            `json:"bundle_path"`
-	DownloadPath string            `json:"download_path"`
-	BundleHash   string            `json:"bundle_hash"`
-	Category     AssetCategory     `json:"category"`
-	DownloadURL  string            `json:"download_url"`
-	Headers      map[string]string `json:"headers,omitempty"`
-	Export       ExportOptions     `json:"export"`
+	TaskID             string            `json:"task_id"`
+	JobID              string            `json:"job_id"`
+	Region             Region            `json:"region"`
+	BundlePath         string            `json:"bundle_path"`
+	DownloadPath       string            `json:"download_path"`
+	BundleHash         string            `json:"bundle_hash"`
+	Category           AssetCategory     `json:"category"`
+	DownloadURL        string            `json:"download_url"`
+	Headers            map[string]string `json:"headers,omitempty"`
+	Export             ExportOptions     `json:"export"`
+	EstimatedSizeBytes int64             `json:"estimated_size_bytes,omitempty"`
+	Delayed            bool              `json:"delayed,omitempty"`
 }
 
 type ClientRegistrationRequest struct {
@@ -163,6 +166,7 @@ type JobSnapshot struct {
 	AssetHash    string    `json:"assetHash,omitempty"`
 	Total        int       `json:"total"`
 	Queued       int       `json:"queued"`
+	Delayed      int       `json:"delayed"`
 	Running      int       `json:"running"`
 	Succeeded    int       `json:"succeeded"`
 	Failed       int       `json:"failed"`
@@ -173,23 +177,25 @@ type JobSnapshot struct {
 }
 
 type TaskSnapshot struct {
-	TaskID      string        `json:"task_id"`
-	JobID       string        `json:"job_id"`
-	Region      Region        `json:"region"`
-	BundlePath  string        `json:"bundle_path"`
-	BundleHash  string        `json:"bundle_hash"`
-	Status      TaskStatus    `json:"status"`
-	ClientID    string        `json:"client_id,omitempty"`
-	Attempt     int           `json:"attempt"`
-	MaxAttempts int           `json:"max_attempts"`
-	Stage       ProgressStage `json:"stage,omitempty"`
-	Progress    float64       `json:"progress"`
-	LastError   string        `json:"last_error,omitempty"`
-	LeaseUntil  *time.Time    `json:"lease_until,omitempty"`
-	CreatedAt   time.Time     `json:"created_at"`
-	UpdatedAt   time.Time     `json:"updated_at"`
-	StartedAt   *time.Time    `json:"started_at,omitempty"`
-	FinishedAt  *time.Time    `json:"finished_at,omitempty"`
+	TaskID             string        `json:"task_id"`
+	JobID              string        `json:"job_id"`
+	Region             Region        `json:"region"`
+	BundlePath         string        `json:"bundle_path"`
+	BundleHash         string        `json:"bundle_hash"`
+	EstimatedSizeBytes int64         `json:"estimated_size_bytes,omitempty"`
+	Delayed            bool          `json:"delayed,omitempty"`
+	Status             TaskStatus    `json:"status"`
+	ClientID           string        `json:"client_id,omitempty"`
+	Attempt            int           `json:"attempt"`
+	MaxAttempts        int           `json:"max_attempts"`
+	Stage              ProgressStage `json:"stage,omitempty"`
+	Progress           float64       `json:"progress"`
+	LastError          string        `json:"last_error,omitempty"`
+	LeaseUntil         *time.Time    `json:"lease_until,omitempty"`
+	CreatedAt          time.Time     `json:"created_at"`
+	UpdatedAt          time.Time     `json:"updated_at"`
+	StartedAt          *time.Time    `json:"started_at,omitempty"`
+	FinishedAt         *time.Time    `json:"finished_at,omitempty"`
 }
 
 type ClientSnapshot struct {
@@ -228,11 +234,11 @@ type AuditS3Response struct {
 }
 
 type RequeueRequest struct {
-	Region           Region   `json:"region"`
-	BundlePaths      []string `json:"bundle_paths"`
-	ClearRecord      bool     `json:"clear_record"`
-	DeleteS3Objects  bool     `json:"delete_s3_objects"`
-	S3KeysToDelete   []string `json:"s3_keys_to_delete,omitempty"`
+	Region          Region   `json:"region"`
+	BundlePaths     []string `json:"bundle_paths"`
+	ClearRecord     bool     `json:"clear_record"`
+	DeleteS3Objects bool     `json:"delete_s3_objects"`
+	S3KeysToDelete  []string `json:"s3_keys_to_delete,omitempty"`
 }
 
 type RequeueResponse struct {

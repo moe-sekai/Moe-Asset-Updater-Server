@@ -68,18 +68,27 @@ type AccessLogConfig struct {
 }
 
 type ExecutionConfig struct {
-	TimeoutSeconds   int         `yaml:"timeout_seconds"`
-	AllowCancel      bool        `yaml:"allow_cancel"`
-	BatchSaveSize    int         `yaml:"batch_save_size"`
-	LeaseTTLSeconds  int         `yaml:"lease_ttl_seconds"`
-	HeartbeatSeconds int         `yaml:"heartbeat_seconds"`
-	Retry            RetryConfig `yaml:"retry"`
+	TimeoutSeconds   int                `yaml:"timeout_seconds"`
+	AllowCancel      bool               `yaml:"allow_cancel"`
+	BatchSaveSize    int                `yaml:"batch_save_size"`
+	LeaseTTLSeconds  int                `yaml:"lease_ttl_seconds"`
+	HeartbeatSeconds int                `yaml:"heartbeat_seconds"`
+	Retry            RetryConfig        `yaml:"retry"`
+	Delayed          DelayedQueueConfig `yaml:"delayed"`
 }
 
 type RetryConfig struct {
 	Attempts         int `yaml:"attempts"`
 	InitialBackoffMS int `yaml:"initial_backoff_ms"`
 	MaxBackoffMS     int `yaml:"max_backoff_ms"`
+}
+
+type DelayedQueueConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	ThresholdMB  int      `yaml:"threshold_mb"`
+	MaxRunning   int      `yaml:"max_running"`
+	MaxPerClient int      `yaml:"max_per_client"`
+	PathPatterns []string `yaml:"path_patterns"`
 }
 
 type StorageConfig struct {
@@ -262,6 +271,7 @@ func Load(path string) (*Config, error) {
 
 func Default() Config {
 	cfg := Config{}
+	cfg.Execution.Delayed.Enabled = true
 	cfg.applyDefaults()
 	return cfg
 }
@@ -326,6 +336,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Execution.Retry.Attempts == 0 {
 		c.Execution.Retry.Attempts = 4
+	}
+	if c.Execution.Delayed.ThresholdMB == 0 {
+		c.Execution.Delayed.ThresholdMB = 50
+	}
+	if c.Execution.Delayed.MaxRunning == 0 {
+		c.Execution.Delayed.MaxRunning = 1
+	}
+	if c.Execution.Delayed.MaxPerClient == 0 {
+		c.Execution.Delayed.MaxPerClient = 1
 	}
 	if c.Storage.UploadConcurrency == 0 {
 		c.Storage.UploadConcurrency = 16

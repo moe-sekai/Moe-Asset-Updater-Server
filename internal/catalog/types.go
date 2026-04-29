@@ -32,9 +32,11 @@ type assetBundleInfo struct {
 }
 
 type downloadTask struct {
-	downloadPath string
-	bundlePath   string
-	bundleHash   string
-	category     protocol.AssetCategory
-	priority     int
+	downloadPath       string
+	bundlePath         string
+	bundleHash         string
+	category           protocol.AssetCategory
+	priority           int
+	estimatedSizeBytes int64
+	delayed            bool
 }
