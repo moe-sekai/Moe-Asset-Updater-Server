@@ -41,6 +41,27 @@ execution:
     attempts: 4
     initial_backoff_ms: 1000
     max_backoff_ms: 4000
+  priority:
+    # Bundles whose path matches one of these regexes are leased before normal tasks.
+    # Lease ordering: priority queue -> normal queue -> delayed queue.
+    enabled: true
+    path_patterns:
+      - "^character/member.*"
+      - "^event/.*"
+      - "^gacha/.*"
+      - "^virtual_live/select/banner/.*"
+      - "^home/banner/.*"
+      - "^music/.*"
+      - "^honor/.*"
+      - "^rank_live/honor/.*"
+      - "^bonds_honor/.*"
+      - "^sound/.*"
+      - "^character/character_select"
+      - "^stamp/.*"
+      - "^thumbnail/.*"
+      - "^scenario/.*"
+      - "^virtual_live/mc/scenario/.*"
+      - "^live/2dmode/.*"
   delayed:
     # Large unpack directories are held until all normal tasks finish, then leased slowly.
     enabled: true

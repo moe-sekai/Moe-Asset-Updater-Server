@@ -448,7 +448,8 @@ func (m *Manager) leaseCandidatesLocked(delayed bool) []*taskState {
 	if delayed {
 		wantedStatus = protocol.TaskStatusDelayed
 	}
-	candidates := make([]*taskState, 0)
+	priorityCandidates := make([]*taskState, 0)
+	regularCandidates := make([]*taskState, 0)
 	for _, jobID := range m.jobOrder {
 		job := m.jobs[jobID]
 		if job == nil || job.status == protocol.JobStatusCancelled || isTerminal(jobTaskStatusToTaskStatus(job.status)) {
@@ -456,12 +457,17 @@ func (m *Manager) leaseCandidatesLocked(delayed bool) []*taskState {
 		}
 		for _, taskID := range job.taskIDs {
 			task := m.tasks[taskID]
-			if task != nil && task.status == wantedStatus && task.payload.Delayed == delayed {
-				candidates = append(candidates, task)
+			if task == nil || task.status != wantedStatus || task.payload.Delayed != delayed {
+				continue
+			}
+			if !delayed && task.payload.Priority {
+				priorityCandidates = append(priorityCandidates, task)
+			} else {
+				regularCandidates = append(regularCandidates, task)
 			}
 		}
 	}
-	return candidates
+	return append(priorityCandidates, regularCandidates...)
 }
 
 func (m *Manager) hasRegularWorkLocked() bool {
@@ -585,6 +591,7 @@ func (m *Manager) taskSnapshotLocked(task *taskState) protocol.TaskSnapshot {
 		BundlePath:         task.payload.BundlePath,
 		BundleHash:         task.payload.BundleHash,
 		EstimatedSizeBytes: task.payload.EstimatedSizeBytes,
+		Priority:           task.payload.Priority,
 		Delayed:            task.payload.Delayed,
 		Status:             task.status,
 		ClientID:           task.clientID,

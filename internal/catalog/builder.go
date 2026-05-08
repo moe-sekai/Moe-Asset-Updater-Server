@@ -345,6 +345,12 @@ func (b *Builder) buildDownloadList(region protocol.Region, regionCfg config.Reg
 			continue
 		}
 		downloadPath := getDownloadPath(region, regionCfg.Provider.Kind, bundleName, bundleInfo)
+		isPriority := b.shouldPrioritizeBundle(bundleName)
+		isDelayed := b.shouldDelayBundle(bundleName, bundleInfo.FileSize)
+		// Priority queue overrides delayed queue when both match.
+		if isPriority {
+			isDelayed = false
+		}
 		tasks = append(tasks, downloadTask{
 			downloadPath:       downloadPath,
 			bundlePath:         bundleName,
@@ -352,7 +358,8 @@ func (b *Builder) buildDownloadList(region protocol.Region, regionCfg config.Reg
 			category:           bundleInfo.Category,
 			priority:           getDownloadPriority(bundleName, regionCfg.Filters.Priority),
 			estimatedSizeBytes: bundleInfo.FileSize,
-			delayed:            b.shouldDelayBundle(bundleName, bundleInfo.FileSize),
+			priorityQueue:      isPriority,
+			delayed:            isDelayed,
 		})
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
@@ -374,10 +381,24 @@ func (b *Builder) buildDownloadList(region protocol.Region, regionCfg config.Reg
 			Headers:            taskHeaders(regionCfg, cookie),
 			Export:             regionCfg.ExportOptions(),
 			EstimatedSizeBytes: task.estimatedSizeBytes,
+			Priority:           task.priorityQueue,
 			Delayed:            task.delayed,
 		})
 	}
 	return payloads
+}
+
+func (b *Builder) shouldPrioritizeBundle(bundleName string) bool {
+	priority := b.cfg.Execution.Priority
+	if !priority.Enabled {
+		return false
+	}
+	for _, pattern := range priority.PathPatterns {
+		if regexpMatch(pattern, bundleName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Builder) shouldDelayBundle(bundleName string, estimatedSizeBytes int64) bool {

@@ -99,6 +99,7 @@ type TaskPayload struct {
 	Headers            map[string]string `json:"headers,omitempty"`
 	Export             ExportOptions     `json:"export"`
 	EstimatedSizeBytes int64             `json:"estimated_size_bytes,omitempty"`
+	Priority           bool              `json:"priority,omitempty"`
 	Delayed            bool              `json:"delayed,omitempty"`
 }
 
@@ -183,6 +184,7 @@ type TaskSnapshot struct {
 	BundlePath         string        `json:"bundle_path"`
 	BundleHash         string        `json:"bundle_hash"`
 	EstimatedSizeBytes int64         `json:"estimated_size_bytes,omitempty"`
+	Priority           bool          `json:"priority,omitempty"`
 	Delayed            bool          `json:"delayed,omitempty"`
 	Status             TaskStatus    `json:"status"`
 	ClientID           string        `json:"client_id,omitempty"`

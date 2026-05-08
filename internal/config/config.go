@@ -68,19 +68,25 @@ type AccessLogConfig struct {
 }
 
 type ExecutionConfig struct {
-	TimeoutSeconds   int                `yaml:"timeout_seconds"`
-	AllowCancel      bool               `yaml:"allow_cancel"`
-	BatchSaveSize    int                `yaml:"batch_save_size"`
-	LeaseTTLSeconds  int                `yaml:"lease_ttl_seconds"`
-	HeartbeatSeconds int                `yaml:"heartbeat_seconds"`
-	Retry            RetryConfig        `yaml:"retry"`
-	Delayed          DelayedQueueConfig `yaml:"delayed"`
+	TimeoutSeconds   int                 `yaml:"timeout_seconds"`
+	AllowCancel      bool                `yaml:"allow_cancel"`
+	BatchSaveSize    int                 `yaml:"batch_save_size"`
+	LeaseTTLSeconds  int                 `yaml:"lease_ttl_seconds"`
+	HeartbeatSeconds int                 `yaml:"heartbeat_seconds"`
+	Retry            RetryConfig         `yaml:"retry"`
+	Priority         PriorityQueueConfig `yaml:"priority"`
+	Delayed          DelayedQueueConfig  `yaml:"delayed"`
 }
 
 type RetryConfig struct {
 	Attempts         int `yaml:"attempts"`
 	InitialBackoffMS int `yaml:"initial_backoff_ms"`
 	MaxBackoffMS     int `yaml:"max_backoff_ms"`
+}
+
+type PriorityQueueConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	PathPatterns []string `yaml:"path_patterns"`
 }
 
 type DelayedQueueConfig struct {
@@ -274,6 +280,7 @@ func Load(path string) (*Config, error) {
 
 func Default() Config {
 	cfg := Config{}
+	cfg.Execution.Priority.Enabled = true
 	cfg.Execution.Delayed.Enabled = true
 	cfg.applyDefaults()
 	return cfg

@@ -155,6 +155,88 @@ func TestDelayedTaskFailureRequeuesToDelayedState(t *testing.T) {
 	}
 }
 
+func TestLeasePrefersPriorityTasksBeforeRegularTasks(t *testing.T) {
+	cfg := delayedTestConfig()
+	manager := NewManager(&cfg)
+
+	manager.CreateJob(protocol.JobRequest{Server: protocol.RegionJP}, []protocol.TaskPayload{
+		priorityTaskPayload("normal-a.bundle", false, false),
+		priorityTaskPayload("normal-b.bundle", false, false),
+		priorityTaskPayload("priority-a.bundle", true, false),
+	})
+
+	clientID := manager.Register(protocol.ClientRegistrationRequest{MaxTasks: 1}).ClientID
+
+	first, err := manager.Lease(protocol.LeaseRequest{ClientID: clientID, MaxTasks: 1})
+	if err != nil {
+		t.Fatalf("lease first task: %v", err)
+	}
+	if len(first) != 1 || !first[0].Priority {
+		t.Fatalf("expected priority task to be leased first, got %#v", first)
+	}
+}
+
+func TestLeasePriorityBeatsDelayedAndNormal(t *testing.T) {
+	cfg := delayedTestConfig()
+	manager := NewManager(&cfg)
+
+	manager.CreateJob(protocol.JobRequest{Server: protocol.RegionJP}, []protocol.TaskPayload{
+		priorityTaskPayload("big.bundle", false, true),
+		priorityTaskPayload("normal.bundle", false, false),
+		priorityTaskPayload("priority.bundle", true, false),
+	})
+
+	clientID := manager.Register(protocol.ClientRegistrationRequest{MaxTasks: 1}).ClientID
+
+	leased, err := manager.Lease(protocol.LeaseRequest{ClientID: clientID, MaxTasks: 1})
+	if err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	if len(leased) != 1 || leased[0].BundlePath != "priority.bundle" {
+		t.Fatalf("expected priority bundle first, got %#v", leased)
+	}
+	if _, err := manager.Complete(leased[0].TaskID); err != nil {
+		t.Fatalf("complete priority task: %v", err)
+	}
+
+	leased, err = manager.Lease(protocol.LeaseRequest{ClientID: clientID, MaxTasks: 1})
+	if err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	if len(leased) != 1 || leased[0].BundlePath != "normal.bundle" {
+		t.Fatalf("expected normal bundle second, got %#v", leased)
+	}
+	if _, err := manager.Complete(leased[0].TaskID); err != nil {
+		t.Fatalf("complete normal task: %v", err)
+	}
+
+	leased, err = manager.Lease(protocol.LeaseRequest{ClientID: clientID, MaxTasks: 1})
+	if err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	if len(leased) != 1 || !leased[0].Delayed {
+		t.Fatalf("expected delayed bundle last, got %#v", leased)
+	}
+}
+
+func priorityTaskPayload(bundlePath string, priority bool, delayed bool) protocol.TaskPayload {
+	estimatedSize := int64(4 * 1024 * 1024)
+	if delayed {
+		estimatedSize = 64 * 1024 * 1024
+	}
+	return protocol.TaskPayload{
+		Region:             protocol.RegionJP,
+		BundlePath:         bundlePath,
+		DownloadPath:       bundlePath,
+		BundleHash:         bundlePath + "-hash",
+		Category:           protocol.AssetCategoryOnDemand,
+		DownloadURL:        "https://example.invalid/" + bundlePath,
+		EstimatedSizeBytes: estimatedSize,
+		Priority:           priority,
+		Delayed:            delayed,
+	}
+}
+
 func delayedTestConfig() config.Config {
 	cfg := config.Default()
 	cfg.Execution.Delayed.Enabled = true
