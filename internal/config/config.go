@@ -133,11 +133,14 @@ type GitSyncConfig struct {
 }
 
 type AssetHashWatchConfig struct {
-	Enabled         bool                         `yaml:"enabled"`
-	IntervalSeconds int                          `yaml:"interval_seconds"`
-	GitHubToken     string                       `yaml:"github_token"`
-	StateFile       string                       `yaml:"state_file"`
-	Targets         []AssetHashWatchTargetConfig `yaml:"targets"`
+	Enabled                bool                         `yaml:"enabled"`
+	IntervalSeconds        int                          `yaml:"interval_seconds"`
+	GitHubToken            string                       `yaml:"github_token"`
+	StateFile              string                       `yaml:"state_file"`
+	RecheckEnabled         *bool                        `yaml:"recheck_enabled"`
+	RecheckIntervalSeconds int                          `yaml:"recheck_interval_seconds"`
+	RecheckTimeoutSeconds  int                          `yaml:"recheck_timeout_seconds"`
+	Targets                []AssetHashWatchTargetConfig `yaml:"targets"`
 }
 
 type AssetHashWatchTargetConfig struct {
@@ -351,6 +354,16 @@ func (c *Config) applyDefaults() {
 	}
 	if c.GitSync.AssetHashWatch.IntervalSeconds <= 0 {
 		c.GitSync.AssetHashWatch.IntervalSeconds = 60
+	}
+	if c.GitSync.AssetHashWatch.RecheckEnabled == nil {
+		enabled := true
+		c.GitSync.AssetHashWatch.RecheckEnabled = &enabled
+	}
+	if c.GitSync.AssetHashWatch.RecheckIntervalSeconds <= 0 {
+		c.GitSync.AssetHashWatch.RecheckIntervalSeconds = 300
+	}
+	if c.GitSync.AssetHashWatch.RecheckTimeoutSeconds <= 0 {
+		c.GitSync.AssetHashWatch.RecheckTimeoutSeconds = 3600
 	}
 	if c.GitSync.AssetHashWatch.GitHubToken == "" {
 		c.GitSync.AssetHashWatch.GitHubToken = os.Getenv("GITHUB_TOKEN")

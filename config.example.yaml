@@ -82,6 +82,10 @@ git_sync:
     interval_seconds: 60
     github_token: "${GITHUB_TOKEN}"
     state_file: "/app/data/github_asset_hash_watch.json"
+    # If GitHub updates before asset bundles are ready, keep rechecking briefly.
+    recheck_enabled: true
+    recheck_interval_seconds: 300
+    recheck_timeout_seconds: 3600
     targets:
       - region: cn
         url: "https://github.com/Team-Haruki/haruki-sekai-sc-master/tree/main/master"

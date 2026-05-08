@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"moe-asset-server/internal/config"
 	"moe-asset-server/internal/protocol"
@@ -62,7 +63,7 @@ func TestCheckOnceBaselinesThenCreatesJobOnHashChange(t *testing.T) {
 		if region != protocol.RegionCN || oldHash != "hash-a" || newHash != "hash-b" {
 			t.Fatalf("unexpected change callback region=%s old=%s new=%s", region, oldHash, newHash)
 		}
-		return protocol.JobSnapshot{ID: "job-1"}, nil
+		return protocol.JobSnapshot{ID: "job-1", Total: 1}, nil
 	})
 
 	for i := 0; i < 3; i++ {
@@ -76,6 +77,188 @@ func TestCheckOnceBaselinesThenCreatesJobOnHashChange(t *testing.T) {
 	state := watcher.targetState(watcher.targets[0])
 	if state.LastHash != "hash-b" || state.ETag != `"etag-b"` || state.LastJobID != "job-1" {
 		t.Fatalf("unexpected persisted state: %+v", state)
+	}
+}
+
+func TestCheckOnceSchedulesRecheckWhenHashChangeCreatesEmptyJob(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	requests := 0
+	created := 0
+	watcher := newTestWatcher(t, stateFile, func(req *http.Request) (*http.Response, error) {
+		requests++
+		switch requests {
+		case 1:
+			return githubResponse(req, http.StatusOK, "hash-a", `"etag-a"`), nil
+		case 2:
+			if got := req.Header.Get("If-None-Match"); got != `"etag-a"` {
+				t.Fatalf("expected hash change request with etag-a, got %q", got)
+			}
+			return githubResponse(req, http.StatusOK, "hash-b", `"etag-b"`), nil
+		default:
+			t.Fatalf("unexpected request %d", requests)
+			return nil, nil
+		}
+	}, func(ctx context.Context, region protocol.Region, oldHash string, newHash string) (protocol.JobSnapshot, error) {
+		created++
+		if oldHash != "hash-a" || newHash != "hash-b" {
+			t.Fatalf("unexpected change callback old=%s new=%s", oldHash, newHash)
+		}
+		return protocol.JobSnapshot{ID: "job-empty", Total: 0}, nil
+	})
+
+	if err := watcher.CheckOnce(context.Background()); err != nil {
+		t.Fatalf("baseline check: %v", err)
+	}
+	if err := watcher.CheckOnce(context.Background()); err != nil {
+		t.Fatalf("hash change check: %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("expected 1 created empty job, got %d", created)
+	}
+	state := watcher.targetState(watcher.targets[0])
+	if state.LastHash != "hash-a" {
+		t.Fatalf("empty job should not advance last hash, got %s", state.LastHash)
+	}
+	if state.PendingHash != "hash-b" || state.PendingOldHash != "hash-a" {
+		t.Fatalf("unexpected pending recheck state: %+v", state)
+	}
+	if state.RecheckStartedAt == nil || state.RecheckNextAt == nil || state.RecheckDeadlineAt == nil {
+		t.Fatalf("expected recheck timestamps to be set: %+v", state)
+	}
+	if state.LastEmptyJobID != "job-empty" {
+		t.Fatalf("expected empty job id to be recorded, got %q", state.LastEmptyJobID)
+	}
+}
+
+func TestPendingRecheckKeepsPendingWhenJobStillEmpty(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	requests := 0
+	created := 0
+	watcher := newTestWatcher(t, stateFile, func(req *http.Request) (*http.Response, error) {
+		requests++
+		return githubResponse(req, http.StatusOK, "hash-b", `"etag-b"`), nil
+	}, func(ctx context.Context, region protocol.Region, oldHash string, newHash string) (protocol.JobSnapshot, error) {
+		created++
+		if oldHash != "hash-a" || newHash != "hash-b" {
+			t.Fatalf("unexpected recheck callback old=%s new=%s", oldHash, newHash)
+		}
+		return protocol.JobSnapshot{ID: "job-empty-recheck", Total: 0}, nil
+	})
+
+	now := time.Now()
+	state := targetState{
+		LastHash:          "hash-a",
+		ETag:              `"etag-a"`,
+		PendingHash:       "hash-b",
+		PendingOldHash:    "hash-a",
+		RecheckStartedAt:  ptrTime(now.Add(-10 * time.Minute)),
+		RecheckNextAt:     ptrTime(now.Add(-time.Minute)),
+		RecheckDeadlineAt: ptrTime(now.Add(time.Hour)),
+		LastEmptyJobID:    "job-empty-first",
+	}
+	if err := watcher.storeTargetState(watcher.targets[0], state); err != nil {
+		t.Fatalf("store pending state: %v", err)
+	}
+
+	if err := watcher.CheckOnce(context.Background()); err != nil {
+		t.Fatalf("pending recheck: %v", err)
+	}
+	if requests != 1 || created != 1 {
+		t.Fatalf("expected one fetch and one recheck, got requests=%d created=%d", requests, created)
+	}
+	state = watcher.targetState(watcher.targets[0])
+	if state.LastHash != "hash-a" || state.PendingHash != "hash-b" {
+		t.Fatalf("empty recheck should keep pending state: %+v", state)
+	}
+	if state.LastEmptyJobID != "job-empty-recheck" || state.LastJobID != "job-empty-recheck" {
+		t.Fatalf("expected latest empty job id to be recorded: %+v", state)
+	}
+	if state.RecheckNextAt == nil || !state.RecheckNextAt.After(time.Now()) {
+		t.Fatalf("expected next recheck to move forward, got %+v", state.RecheckNextAt)
+	}
+}
+
+func TestPendingRecheckConfirmsHashWhenTasksAppear(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	created := 0
+	watcher := newTestWatcher(t, stateFile, func(req *http.Request) (*http.Response, error) {
+		return githubResponse(req, http.StatusOK, "hash-b", `"etag-b"`), nil
+	}, func(ctx context.Context, region protocol.Region, oldHash string, newHash string) (protocol.JobSnapshot, error) {
+		created++
+		if oldHash != "hash-a" || newHash != "hash-b" {
+			t.Fatalf("unexpected recheck callback old=%s new=%s", oldHash, newHash)
+		}
+		return protocol.JobSnapshot{ID: "job-ready", Total: 10}, nil
+	})
+
+	now := time.Now()
+	state := targetState{
+		LastHash:          "hash-a",
+		ETag:              `"etag-a"`,
+		PendingHash:       "hash-b",
+		PendingOldHash:    "hash-a",
+		RecheckStartedAt:  ptrTime(now.Add(-10 * time.Minute)),
+		RecheckNextAt:     ptrTime(now.Add(-time.Minute)),
+		RecheckDeadlineAt: ptrTime(now.Add(time.Hour)),
+		LastEmptyJobID:    "job-empty-first",
+	}
+	if err := watcher.storeTargetState(watcher.targets[0], state); err != nil {
+		t.Fatalf("store pending state: %v", err)
+	}
+
+	if err := watcher.CheckOnce(context.Background()); err != nil {
+		t.Fatalf("pending recheck: %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("expected one recheck job, got %d", created)
+	}
+	state = watcher.targetState(watcher.targets[0])
+	if state.LastHash != "hash-b" || state.ETag != `"etag-b"` || state.LastJobID != "job-ready" {
+		t.Fatalf("expected hash to be confirmed, got %+v", state)
+	}
+	if state.PendingHash != "" || state.RecheckNextAt != nil || state.LastEmptyJobID != "" {
+		t.Fatalf("expected recheck state to be cleared, got %+v", state)
+	}
+}
+
+func TestPendingRecheckTimesOutAndConfirmsHash(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	created := 0
+	watcher := newTestWatcher(t, stateFile, func(req *http.Request) (*http.Response, error) {
+		return githubResponse(req, http.StatusOK, "hash-b", `"etag-b"`), nil
+	}, func(ctx context.Context, region protocol.Region, oldHash string, newHash string) (protocol.JobSnapshot, error) {
+		created++
+		return protocol.JobSnapshot{ID: "unexpected", Total: 1}, nil
+	})
+
+	now := time.Now()
+	state := targetState{
+		LastHash:          "hash-a",
+		ETag:              `"etag-a"`,
+		LastJobID:         "job-empty-final",
+		PendingHash:       "hash-b",
+		PendingOldHash:    "hash-a",
+		RecheckStartedAt:  ptrTime(now.Add(-2 * time.Hour)),
+		RecheckNextAt:     ptrTime(now.Add(-time.Hour)),
+		RecheckDeadlineAt: ptrTime(now.Add(-time.Minute)),
+		LastEmptyJobID:    "job-empty-final",
+	}
+	if err := watcher.storeTargetState(watcher.targets[0], state); err != nil {
+		t.Fatalf("store pending state: %v", err)
+	}
+
+	if err := watcher.CheckOnce(context.Background()); err != nil {
+		t.Fatalf("pending timeout check: %v", err)
+	}
+	if created != 0 {
+		t.Fatalf("expected timeout to confirm without creating another job, got %d", created)
+	}
+	state = watcher.targetState(watcher.targets[0])
+	if state.LastHash != "hash-b" || state.LastJobID != "job-empty-final" {
+		t.Fatalf("expected timed out pending hash to be confirmed, got %+v", state)
+	}
+	if state.PendingHash != "" || state.RecheckDeadlineAt != nil || state.LastEmptyJobID != "" {
+		t.Fatalf("expected pending state to be cleared after timeout, got %+v", state)
 	}
 }
 
@@ -118,8 +301,10 @@ func TestCheckOnceDoesNotAdvanceHashWhenJobCreationFails(t *testing.T) {
 func newTestWatcher(t *testing.T, stateFile string, rt roundTripFunc, handler ChangeHandler) *Watcher {
 	t.Helper()
 	watcher, err := New(config.AssetHashWatchConfig{
-		IntervalSeconds: 60,
-		StateFile:       stateFile,
+		IntervalSeconds:        60,
+		RecheckIntervalSeconds: 300,
+		RecheckTimeoutSeconds:  3600,
+		StateFile:              stateFile,
 		Targets: []config.AssetHashWatchTargetConfig{
 			{
 				Region: protocol.RegionCN,

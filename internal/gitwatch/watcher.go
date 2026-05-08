@@ -19,8 +19,12 @@ import (
 )
 
 const (
-	defaultAPIBaseURL = "https://api.github.com"
-	defaultStateFile  = "./data/github_asset_hash_watch.json"
+	defaultAPIBaseURL             = "https://api.github.com"
+	defaultStateFile              = "./data/github_asset_hash_watch.json"
+	defaultRecheckIntervalSeconds = 300
+	defaultRecheckTimeoutSeconds  = 3600
+	minimumRecheckIntervalSeconds = 1
+	minimumRecheckTimeoutSeconds  = 1
 )
 
 type Logger interface {
@@ -33,13 +37,15 @@ type Logger interface {
 type ChangeHandler func(ctx context.Context, region protocol.Region, oldHash string, newHash string) (protocol.JobSnapshot, error)
 
 type Watcher struct {
-	cfg        config.AssetHashWatchConfig
-	logger     Logger
-	onChange   ChangeHandler
-	client     *http.Client
-	apiBaseURL string
-	interval   time.Duration
-	targets    []target
+	cfg             config.AssetHashWatchConfig
+	logger          Logger
+	onChange        ChangeHandler
+	client          *http.Client
+	apiBaseURL      string
+	interval        time.Duration
+	recheckInterval time.Duration
+	recheckTimeout  time.Duration
+	targets         []target
 
 	mu    sync.Mutex
 	state watchState
@@ -60,13 +66,19 @@ type watchState struct {
 }
 
 type targetState struct {
-	Region        protocol.Region `json:"region"`
-	URL           string          `json:"url"`
-	LastHash      string          `json:"last_hash"`
-	ETag          string          `json:"etag,omitempty"`
-	LastCheckedAt time.Time       `json:"last_checked_at"`
-	LastJobID     string          `json:"last_job_id,omitempty"`
-	LastError     string          `json:"last_error,omitempty"`
+	Region            protocol.Region `json:"region"`
+	URL               string          `json:"url"`
+	LastHash          string          `json:"last_hash"`
+	ETag              string          `json:"etag,omitempty"`
+	LastCheckedAt     time.Time       `json:"last_checked_at"`
+	LastJobID         string          `json:"last_job_id,omitempty"`
+	LastError         string          `json:"last_error,omitempty"`
+	PendingHash       string          `json:"pending_hash,omitempty"`
+	PendingOldHash    string          `json:"pending_old_hash,omitempty"`
+	RecheckStartedAt  *time.Time      `json:"recheck_started_at,omitempty"`
+	RecheckNextAt     *time.Time      `json:"recheck_next_at,omitempty"`
+	RecheckDeadlineAt *time.Time      `json:"recheck_deadline_at,omitempty"`
+	LastEmptyJobID    string          `json:"last_empty_job_id,omitempty"`
 }
 
 type fetchResult struct {
@@ -92,6 +104,22 @@ func New(cfg config.AssetHashWatchConfig, logger Logger, onChange ChangeHandler)
 	if cfg.IntervalSeconds <= 0 {
 		cfg.IntervalSeconds = 60
 	}
+	if cfg.RecheckEnabled == nil {
+		enabled := true
+		cfg.RecheckEnabled = &enabled
+	}
+	if cfg.RecheckIntervalSeconds <= 0 {
+		cfg.RecheckIntervalSeconds = defaultRecheckIntervalSeconds
+	}
+	if cfg.RecheckIntervalSeconds < minimumRecheckIntervalSeconds {
+		cfg.RecheckIntervalSeconds = minimumRecheckIntervalSeconds
+	}
+	if cfg.RecheckTimeoutSeconds <= 0 {
+		cfg.RecheckTimeoutSeconds = defaultRecheckTimeoutSeconds
+	}
+	if cfg.RecheckTimeoutSeconds < minimumRecheckTimeoutSeconds {
+		cfg.RecheckTimeoutSeconds = minimumRecheckTimeoutSeconds
+	}
 	if cfg.StateFile == "" {
 		cfg.StateFile = defaultStateFile
 	}
@@ -114,14 +142,16 @@ func New(cfg config.AssetHashWatchConfig, logger Logger, onChange ChangeHandler)
 	}
 
 	w := &Watcher{
-		cfg:        cfg,
-		logger:     logger,
-		onChange:   onChange,
-		client:     &http.Client{Timeout: 30 * time.Second},
-		apiBaseURL: defaultAPIBaseURL,
-		interval:   time.Duration(cfg.IntervalSeconds) * time.Second,
-		targets:    targets,
-		state:      watchState{Targets: map[string]targetState{}},
+		cfg:             cfg,
+		logger:          logger,
+		onChange:        onChange,
+		client:          &http.Client{Timeout: 30 * time.Second},
+		apiBaseURL:      defaultAPIBaseURL,
+		interval:        time.Duration(cfg.IntervalSeconds) * time.Second,
+		recheckInterval: time.Duration(cfg.RecheckIntervalSeconds) * time.Second,
+		recheckTimeout:  time.Duration(cfg.RecheckTimeoutSeconds) * time.Second,
+		targets:         targets,
+		state:           watchState{Targets: map[string]targetState{}},
 	}
 	if err := w.loadState(); err != nil {
 		return nil, err
@@ -173,7 +203,7 @@ func (w *Watcher) CheckOnce(ctx context.Context) error {
 func (w *Watcher) checkTarget(ctx context.Context, target target) error {
 	state := w.targetState(target)
 	requestETag := state.ETag
-	if state.LastHash == "" {
+	if state.LastHash == "" || state.PendingHash != "" {
 		requestETag = ""
 	}
 
@@ -202,11 +232,15 @@ func (w *Watcher) checkTarget(ctx context.Context, target target) error {
 	if result.Hash == "" {
 		return errors.New("github commits response did not contain sha")
 	}
+	if state.PendingHash != "" && state.PendingHash == result.Hash {
+		return w.handlePendingRecheck(ctx, target, state, result, now)
+	}
 	if state.LastHash == "" {
 		state.LastHash = result.Hash
 		state.ETag = result.ETag
 		state.LastCheckedAt = now
 		state.LastError = ""
+		state.clearRecheck()
 		if err := w.storeTargetState(target, state); err != nil {
 			return err
 		}
@@ -217,6 +251,7 @@ func (w *Watcher) checkTarget(ctx context.Context, target target) error {
 		state.ETag = result.ETag
 		state.LastCheckedAt = now
 		state.LastError = ""
+		state.clearRecheck()
 		if err := w.storeTargetState(target, state); err != nil {
 			return err
 		}
@@ -224,6 +259,10 @@ func (w *Watcher) checkTarget(ctx context.Context, target target) error {
 		return nil
 	}
 
+	return w.handleHashChange(ctx, target, state, result, now)
+}
+
+func (w *Watcher) handleHashChange(ctx context.Context, target target, state targetState, result fetchResult, now time.Time) error {
 	oldHash := state.LastHash
 	w.logger.Infof("GitHub哈希变化 region=%s target=%s old=%s new=%s", target.Region, target.Description(), oldHash, result.Hash)
 	job, err := w.onChange(ctx, target.Region, oldHash, result.Hash)
@@ -235,17 +274,147 @@ func (w *Watcher) checkTarget(ctx context.Context, target target) error {
 		}
 		return fmt.Errorf("create job after hash change: %w", err)
 	}
+	if job.Total == 0 && w.recheckEnabled() {
+		state = w.scheduleRecheck(state, oldHash, result.Hash, job.ID, now)
+		state.LastCheckedAt = now
+		state.LastError = ""
+		if err := w.storeTargetState(target, state); err != nil {
+			return err
+		}
+		w.logger.Warnf("GitHub哈希变化创建了空任务队列，资源可能未就绪，已安排重检查 region=%s job=%s old=%s new=%s next=%s deadline=%s", target.Region, job.ID, oldHash, result.Hash, formatTime(state.RecheckNextAt), formatTime(state.RecheckDeadlineAt))
+		return nil
+	}
+	if err := w.confirmHashChange(target, state, result, now, job.ID); err != nil {
+		return err
+	}
+	w.logger.Infof("GitHub哈希变化已创建任务队列 region=%s job=%s old=%s new=%s tasks=%d", target.Region, job.ID, oldHash, result.Hash, job.Total)
+	return nil
+}
 
+func (w *Watcher) handlePendingRecheck(ctx context.Context, target target, state targetState, result fetchResult, now time.Time) error {
+	if w.recheckDeadlineExceeded(state, now) {
+		lastEmptyJobID := state.LastEmptyJobID
+		pendingHash := state.PendingHash
+		oldHash := state.PendingOldHash
+		if err := w.confirmHashChange(target, state, result, now, state.LastJobID); err != nil {
+			return err
+		}
+		w.logger.Warnf("GitHub哈希变化重检查超时，未在重检查窗口内发现新资源，已确认哈希 region=%s timeout=%s last_empty_job=%s old=%s new=%s", target.Region, w.recheckTimeout, lastEmptyJobID, oldHash, pendingHash)
+		return nil
+	}
+	if state.RecheckNextAt != nil && now.Before(*state.RecheckNextAt) {
+		state.LastCheckedAt = now
+		state.LastError = ""
+		if result.ETag != "" {
+			state.ETag = result.ETag
+		}
+		if err := w.storeTargetState(target, state); err != nil {
+			return err
+		}
+		w.logger.Debugf("GitHub哈希变化等待重检查 region=%s target=%s hash=%s next=%s", target.Region, target.Description(), state.PendingHash, state.RecheckNextAt.Format(time.RFC3339))
+		return nil
+	}
+
+	oldHash := state.PendingOldHash
+	if oldHash == "" {
+		oldHash = state.LastHash
+	}
+	w.logger.Infof("GitHub哈希变化重检查 region=%s target=%s old=%s new=%s", target.Region, target.Description(), oldHash, state.PendingHash)
+	job, err := w.onChange(ctx, target.Region, oldHash, state.PendingHash)
+	if err != nil {
+		state.LastCheckedAt = now
+		state.LastError = err.Error()
+		state.RecheckNextAt = ptrTime(nextRecheckAt(now, w.recheckInterval, state.RecheckDeadlineAt))
+		if saveErr := w.storeTargetState(target, state); saveErr != nil {
+			return fmt.Errorf("recheck job after hash change: %w; additionally save state: %v", err, saveErr)
+		}
+		return fmt.Errorf("recheck job after hash change: %w", err)
+	}
+	if job.Total == 0 {
+		state.LastCheckedAt = now
+		state.LastJobID = job.ID
+		state.LastEmptyJobID = job.ID
+		state.LastError = ""
+		state.RecheckNextAt = ptrTime(nextRecheckAt(now, w.recheckInterval, state.RecheckDeadlineAt))
+		if result.ETag != "" {
+			state.ETag = result.ETag
+		}
+		if err := w.storeTargetState(target, state); err != nil {
+			return err
+		}
+		w.logger.Warnf("GitHub哈希变化重检查仍未发现新资源，继续等待 region=%s job=%s old=%s new=%s next=%s deadline=%s", target.Region, job.ID, oldHash, state.PendingHash, formatTime(state.RecheckNextAt), formatTime(state.RecheckDeadlineAt))
+		return nil
+	}
+	if err := w.confirmHashChange(target, state, result, now, job.ID); err != nil {
+		return err
+	}
+	w.logger.Infof("GitHub哈希变化重检查已创建任务队列 region=%s job=%s old=%s new=%s tasks=%d", target.Region, job.ID, oldHash, state.PendingHash, job.Total)
+	return nil
+}
+
+func (w *Watcher) scheduleRecheck(state targetState, oldHash string, pendingHash string, jobID string, now time.Time) targetState {
+	if state.PendingHash != pendingHash || state.RecheckStartedAt == nil || state.RecheckDeadlineAt == nil {
+		startedAt := now
+		deadlineAt := now.Add(w.recheckTimeout)
+		state.RecheckStartedAt = &startedAt
+		state.RecheckDeadlineAt = &deadlineAt
+	}
+	nextAt := nextRecheckAt(now, w.recheckInterval, state.RecheckDeadlineAt)
+	state.PendingHash = pendingHash
+	state.PendingOldHash = oldHash
+	state.RecheckNextAt = &nextAt
+	state.LastJobID = jobID
+	state.LastEmptyJobID = jobID
+	return state
+}
+
+func (w *Watcher) confirmHashChange(target target, state targetState, result fetchResult, now time.Time, jobID string) error {
 	state.LastHash = result.Hash
 	state.ETag = result.ETag
 	state.LastCheckedAt = now
-	state.LastJobID = job.ID
+	state.LastJobID = jobID
 	state.LastError = ""
-	if err := w.storeTargetState(target, state); err != nil {
-		return err
+	state.clearRecheck()
+	return w.storeTargetState(target, state)
+}
+
+func (w *Watcher) recheckEnabled() bool {
+	return w.cfg.RecheckEnabled == nil || *w.cfg.RecheckEnabled
+}
+
+func (w *Watcher) recheckDeadlineExceeded(state targetState, now time.Time) bool {
+	return state.RecheckDeadlineAt != nil && !now.Before(*state.RecheckDeadlineAt)
+}
+
+func (s *targetState) clearRecheck() {
+	s.PendingHash = ""
+	s.PendingOldHash = ""
+	s.RecheckStartedAt = nil
+	s.RecheckNextAt = nil
+	s.RecheckDeadlineAt = nil
+	s.LastEmptyJobID = ""
+}
+
+func nextRecheckAt(now time.Time, interval time.Duration, deadline *time.Time) time.Time {
+	if interval <= 0 {
+		interval = time.Duration(defaultRecheckIntervalSeconds) * time.Second
 	}
-	w.logger.Infof("GitHub哈希变化已创建任务队列 region=%s job=%s old=%s new=%s", target.Region, job.ID, oldHash, result.Hash)
-	return nil
+	next := now.Add(interval)
+	if deadline != nil && next.After(*deadline) {
+		return *deadline
+	}
+	return next
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
+}
+
+func formatTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.Format(time.RFC3339)
 }
 
 func (w *Watcher) fetchLatestHash(ctx context.Context, target target, etag string) (fetchResult, error) {
