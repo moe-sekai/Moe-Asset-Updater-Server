@@ -38,6 +38,7 @@ type downloadTask struct {
 	category           protocol.AssetCategory
 	priority           int
 	estimatedSizeBytes int64
+	queue              protocol.TaskQueue
 	priorityQueue      bool
 	delayed            bool
 }

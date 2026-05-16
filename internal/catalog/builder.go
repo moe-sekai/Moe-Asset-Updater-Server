@@ -345,12 +345,7 @@ func (b *Builder) buildDownloadList(region protocol.Region, regionCfg config.Reg
 			continue
 		}
 		downloadPath := getDownloadPath(region, regionCfg.Provider.Kind, bundleName, bundleInfo)
-		isPriority := b.shouldPrioritizeBundle(bundleName)
-		isDelayed := b.shouldDelayBundle(bundleName, bundleInfo.FileSize)
-		// Priority queue overrides delayed queue when both match.
-		if isPriority {
-			isDelayed = false
-		}
+		queue := b.bundleQueue(bundleName, bundleInfo.FileSize)
 		tasks = append(tasks, downloadTask{
 			downloadPath:       downloadPath,
 			bundlePath:         bundleName,
@@ -358,8 +353,9 @@ func (b *Builder) buildDownloadList(region protocol.Region, regionCfg config.Reg
 			category:           bundleInfo.Category,
 			priority:           getDownloadPriority(bundleName, regionCfg.Filters.Priority),
 			estimatedSizeBytes: bundleInfo.FileSize,
-			priorityQueue:      isPriority,
-			delayed:            isDelayed,
+			queue:              queue,
+			priorityQueue:      queue == protocol.TaskQueuePriority,
+			delayed:            queue == protocol.TaskQueueDelayed,
 		})
 	}
 	sort.SliceStable(tasks, func(i, j int) bool {
@@ -381,11 +377,25 @@ func (b *Builder) buildDownloadList(region protocol.Region, regionCfg config.Reg
 			Headers:            taskHeaders(regionCfg, cookie),
 			Export:             regionCfg.ExportOptions(),
 			EstimatedSizeBytes: task.estimatedSizeBytes,
+			Queue:              task.queue,
 			Priority:           task.priorityQueue,
 			Delayed:            task.delayed,
 		})
 	}
 	return payloads
+}
+
+func (b *Builder) bundleQueue(bundleName string, estimatedSizeBytes int64) protocol.TaskQueue {
+	switch {
+	case b.shouldDelayBundle(bundleName, estimatedSizeBytes):
+		return protocol.TaskQueueDelayed
+	case b.shouldLowPriorityBundle(bundleName):
+		return protocol.TaskQueueLowPriority
+	case b.shouldPrioritizeBundle(bundleName):
+		return protocol.TaskQueuePriority
+	default:
+		return protocol.TaskQueueNormal
+	}
 }
 
 func (b *Builder) shouldPrioritizeBundle(bundleName string) bool {
@@ -394,6 +404,19 @@ func (b *Builder) shouldPrioritizeBundle(bundleName string) bool {
 		return false
 	}
 	for _, pattern := range priority.PathPatterns {
+		if regexpMatch(pattern, bundleName) {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Builder) shouldLowPriorityBundle(bundleName string) bool {
+	lowPriority := b.cfg.Execution.LowPriority
+	if !lowPriority.Enabled {
+		return false
+	}
+	for _, pattern := range lowPriority.PathPatterns {
 		if regexpMatch(pattern, bundleName) {
 			return true
 		}

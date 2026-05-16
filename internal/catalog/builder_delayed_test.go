@@ -46,8 +46,55 @@ func TestBuildDownloadListDoesNotMarkDelayedWhenDisabled(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("expected one task, got %d", len(tasks))
 	}
-	if tasks[0].Delayed {
+	if tasks[0].Delayed || tasks[0].Queue == protocol.TaskQueueDelayed {
 		t.Fatalf("did not expect delayed marker when delayed queue is disabled")
+	}
+}
+
+func TestBuildDownloadListMarksLowPriorityByPathPattern(t *testing.T) {
+	cfg := delayedCatalogConfig()
+	cfg.Execution.LowPriority.PathPatterns = []string{`^model3d(?:/|$)`}
+	builder := NewBuilder(&cfg)
+
+	tasks := builder.buildDownloadList(protocol.RegionJP, delayedRegionConfig(), assetInfoWithBundle("model3d/chara/body", 1024), nil, "asset-version", "asset-hash", "")
+	if len(tasks) != 1 {
+		t.Fatalf("expected one task, got %d", len(tasks))
+	}
+	if tasks[0].Queue != protocol.TaskQueueLowPriority {
+		t.Fatalf("expected low priority queue, got %q", tasks[0].Queue)
+	}
+	if tasks[0].Delayed || tasks[0].Priority {
+		t.Fatalf("low priority task should not use delayed/priority compatibility flags, got %#v", tasks[0])
+	}
+}
+
+func TestBuildDownloadListDelayedBeatsLowPriority(t *testing.T) {
+	cfg := delayedCatalogConfig()
+	cfg.Execution.Delayed.PathPatterns = []string{`^model3d(?:/|$)`}
+	cfg.Execution.LowPriority.PathPatterns = []string{`^model3d(?:/|$)`}
+	builder := NewBuilder(&cfg)
+
+	tasks := builder.buildDownloadList(protocol.RegionJP, delayedRegionConfig(), assetInfoWithBundle("model3d/chara/body", 1024), nil, "asset-version", "asset-hash", "")
+	if len(tasks) != 1 {
+		t.Fatalf("expected one task, got %d", len(tasks))
+	}
+	if tasks[0].Queue != protocol.TaskQueueDelayed || !tasks[0].Delayed {
+		t.Fatalf("expected delayed queue to beat low priority, got %#v", tasks[0])
+	}
+}
+
+func TestBuildDownloadListLowPriorityBeatsPriority(t *testing.T) {
+	cfg := delayedCatalogConfig()
+	cfg.Execution.Priority.PathPatterns = []string{`^model3d(?:/|$)`}
+	cfg.Execution.LowPriority.PathPatterns = []string{`^model3d(?:/|$)`}
+	builder := NewBuilder(&cfg)
+
+	tasks := builder.buildDownloadList(protocol.RegionJP, delayedRegionConfig(), assetInfoWithBundle("model3d/chara/body", 1024), nil, "asset-version", "asset-hash", "")
+	if len(tasks) != 1 {
+		t.Fatalf("expected one task, got %d", len(tasks))
+	}
+	if tasks[0].Queue != protocol.TaskQueueLowPriority || tasks[0].Priority {
+		t.Fatalf("expected low priority to beat priority, got %#v", tasks[0])
 	}
 }
 

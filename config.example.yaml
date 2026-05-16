@@ -43,7 +43,7 @@ execution:
     max_backoff_ms: 4000
   priority:
     # Bundles whose path matches one of these regexes are leased before normal tasks.
-    # Lease ordering: priority queue -> normal queue -> delayed queue.
+    # Lease ordering: priority queue -> normal queue -> low priority queue -> delayed queue.
     enabled: true
     path_patterns:
       - "^character/member.*"
@@ -62,8 +62,19 @@ execution:
       - "^scenario/.*"
       - "^virtual_live/mc/scenario/.*"
       - "^live/2dmode/.*"
+  low_priority:
+    # Directories that are useful but slow/noisy (e.g. 3D/model data). They are still processed,
+    # but only after priority/normal work is done. 0 means unlimited besides client max_tasks.
+    enabled: true
+    max_running: 0
+    max_per_client: 0
+    path_patterns:
+      - "^live2d(?:/|$)"
+      - "^live_pv(?:/|$)"
+      - "^model3d(?:/|$)"
+      - "^streaming_live(?:/|$)"
   delayed:
-    # Large unpack directories are held until all normal tasks finish, then leased slowly.
+    # Heavy queue for very large bundles; leased after low priority work and usually kept single-threaded.
     enabled: true
     threshold_mb: 50
     max_running: 1
@@ -153,6 +164,7 @@ regions:
         export_obj: true
         path_patterns:
           - "^mysekai/fixture(?:/|$)"
+          - "^mysekai/custom_fixture_attach(?:/|$)"
           - "^mysekai/site/field/my_room_asset/skin(?:/|$)"
       usm:
         export: false
@@ -210,6 +222,7 @@ regions:
         export_obj: true
         path_patterns:
           - "^mysekai/fixture(?:/|$)"
+          - "^mysekai/custom_fixture_attach(?:/|$)"
           - "^mysekai/site/field/my_room_asset/skin(?:/|$)"
       usm:
         export: true

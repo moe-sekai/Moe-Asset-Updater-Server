@@ -32,8 +32,11 @@ const (
 
 type TaskStatus string
 
+type TaskQueue string
+
 const (
 	TaskStatusQueued          TaskStatus = "queued"
+	TaskStatusLowPriority     TaskStatus = "low_priority"
 	TaskStatusDelayed         TaskStatus = "delayed"
 	TaskStatusLeased          TaskStatus = "leased"
 	TaskStatusRunning         TaskStatus = "running"
@@ -42,6 +45,13 @@ const (
 	TaskStatusSucceeded       TaskStatus = "succeeded"
 	TaskStatusFailed          TaskStatus = "failed"
 	TaskStatusCancelled       TaskStatus = "cancelled"
+)
+
+const (
+	TaskQueueNormal      TaskQueue = "normal"
+	TaskQueuePriority    TaskQueue = "priority"
+	TaskQueueLowPriority TaskQueue = "low_priority"
+	TaskQueueDelayed     TaskQueue = "delayed"
 )
 
 type ProgressStage string
@@ -101,6 +111,7 @@ type TaskPayload struct {
 	Headers            map[string]string `json:"headers,omitempty"`
 	Export             ExportOptions     `json:"export"`
 	EstimatedSizeBytes int64             `json:"estimated_size_bytes,omitempty"`
+	Queue              TaskQueue         `json:"queue,omitempty"`
 	Priority           bool              `json:"priority,omitempty"`
 	Delayed            bool              `json:"delayed,omitempty"`
 }
@@ -169,6 +180,7 @@ type JobSnapshot struct {
 	AssetHash    string    `json:"assetHash,omitempty"`
 	Total        int       `json:"total"`
 	Queued       int       `json:"queued"`
+	LowPriority  int       `json:"low_priority"`
 	Delayed      int       `json:"delayed"`
 	Running      int       `json:"running"`
 	Succeeded    int       `json:"succeeded"`
@@ -186,6 +198,7 @@ type TaskSnapshot struct {
 	BundlePath         string        `json:"bundle_path"`
 	BundleHash         string        `json:"bundle_hash"`
 	EstimatedSizeBytes int64         `json:"estimated_size_bytes,omitempty"`
+	Queue              TaskQueue     `json:"queue,omitempty"`
 	Priority           bool          `json:"priority,omitempty"`
 	Delayed            bool          `json:"delayed,omitempty"`
 	Status             TaskStatus    `json:"status"`

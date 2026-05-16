@@ -93,10 +93,8 @@ func (m *Manager) CreateJob(req protocol.JobRequest, payloads []protocol.TaskPay
 		taskID := newID("task")
 		payload.TaskID = taskID
 		payload.JobID = jobID
-		status := protocol.TaskStatusQueued
-		if payload.Delayed {
-			status = protocol.TaskStatusDelayed
-		}
+		normalizeTaskQueue(&payload)
+		status := initialStatusForQueue(payload.Queue)
 		task := &taskState{
 			payload:     payload,
 			status:      status,
@@ -234,40 +232,21 @@ func (m *Manager) Lease(req protocol.LeaseRequest) ([]protocol.TaskPayload, erro
 	remaining := limit - active
 	leaseUntil := now.Add(m.cfg.LeaseTTL())
 
-	candidates := m.leaseCandidatesLocked(false)
-	if len(candidates) == 0 {
-		if m.hasRegularWorkLocked() {
-			return []protocol.TaskPayload{}, nil
-		}
-		remaining = m.delayedLeaseCapacityLocked(req.ClientID, remaining)
-		if remaining <= 0 {
-			return []protocol.TaskPayload{}, nil
-		}
-		candidates = m.leaseCandidatesLocked(true)
+	leased := make([]protocol.TaskPayload, 0, remaining)
+	leased = m.leaseQueueLocked(leased, protocol.TaskQueuePriority, req.ClientID, leaseUntil, now, &remaining)
+	leased = m.leaseQueueLocked(leased, protocol.TaskQueueNormal, req.ClientID, leaseUntil, now, &remaining)
+	if remaining <= 0 {
+		return leased, nil
+	}
+	if m.hasRegularWorkLocked() {
+		return leased, nil
 	}
 
-	leased := make([]protocol.TaskPayload, 0, remaining)
-	for _, task := range candidates {
-		if len(leased) >= remaining {
-			break
-		}
-		task.status = protocol.TaskStatusLeased
-		task.clientID = req.ClientID
-		task.attempt++
-		task.stage = protocol.StageQueued
-		task.progress = 0
-		task.lastError = ""
-		task.leaseUntil = &leaseUntil
-		if task.startedAt == nil {
-			startedAt := now
-			task.startedAt = &startedAt
-		}
-		task.updatedAt = now
-		if job := m.jobs[task.payload.JobID]; job != nil {
-			job.updatedAt = now
-		}
-		leased = append(leased, task.payload)
+	leased = m.leaseLimitedQueueLocked(leased, protocol.TaskQueueLowPriority, req.ClientID, leaseUntil, now, &remaining)
+	if remaining <= 0 || m.hasQueueWorkLocked(protocol.TaskQueueLowPriority) {
+		return leased, nil
 	}
+	leased = m.leaseLimitedQueueLocked(leased, protocol.TaskQueueDelayed, req.ClientID, leaseUntil, now, &remaining)
 	return leased, nil
 }
 
@@ -385,7 +364,9 @@ func (m *Manager) TaskPayload(taskID string) (protocol.TaskPayload, bool) {
 	if !ok {
 		return protocol.TaskPayload{}, false
 	}
-	return task.payload, true
+	payload := task.payload
+	normalizeTaskQueue(&payload)
+	return payload, true
 }
 
 // TaskClientID returns the client ID currently leasing the given task.
@@ -405,11 +386,7 @@ func (m *Manager) failTaskLocked(task *taskState, message string, now time.Time)
 	task.leaseUntil = nil
 	task.updatedAt = now
 	if task.attempt < task.maxAttempts {
-		if task.payload.Delayed {
-			task.status = protocol.TaskStatusDelayed
-		} else {
-			task.status = protocol.TaskStatusQueued
-		}
+		task.status = initialStatusForQueue(normalizedTaskQueue(task.payload))
 		task.stage = protocol.StageQueued
 		task.progress = 0
 	} else {
@@ -443,13 +420,57 @@ func (m *Manager) activeTaskCountLocked(clientID string) int {
 	return count
 }
 
-func (m *Manager) leaseCandidatesLocked(delayed bool) []*taskState {
-	wantedStatus := protocol.TaskStatusQueued
-	if delayed {
-		wantedStatus = protocol.TaskStatusDelayed
+func (m *Manager) leaseQueueLocked(leased []protocol.TaskPayload, queue protocol.TaskQueue, clientID string, leaseUntil time.Time, now time.Time, remaining *int) []protocol.TaskPayload {
+	if remaining == nil || *remaining <= 0 {
+		return leased
 	}
-	priorityCandidates := make([]*taskState, 0)
-	regularCandidates := make([]*taskState, 0)
+	candidates := m.leaseCandidatesLocked(queue)
+	for _, task := range candidates {
+		if *remaining <= 0 {
+			break
+		}
+		m.leaseTaskLocked(task, clientID, leaseUntil, now)
+		leased = append(leased, task.payload)
+		*remaining = *remaining - 1
+	}
+	return leased
+}
+
+func (m *Manager) leaseLimitedQueueLocked(leased []protocol.TaskPayload, queue protocol.TaskQueue, clientID string, leaseUntil time.Time, now time.Time, remaining *int) []protocol.TaskPayload {
+	if remaining == nil || *remaining <= 0 {
+		return leased
+	}
+	capacity := m.queueLeaseCapacityLocked(queue, clientID, *remaining)
+	if capacity <= 0 {
+		return leased
+	}
+	before := len(leased)
+	leased = m.leaseQueueLocked(leased, queue, clientID, leaseUntil, now, &capacity)
+	*remaining -= len(leased) - before
+	return leased
+}
+
+func (m *Manager) leaseTaskLocked(task *taskState, clientID string, leaseUntil time.Time, now time.Time) {
+	task.status = protocol.TaskStatusLeased
+	task.clientID = clientID
+	task.attempt++
+	task.stage = protocol.StageQueued
+	task.progress = 0
+	task.lastError = ""
+	task.leaseUntil = &leaseUntil
+	if task.startedAt == nil {
+		startedAt := now
+		task.startedAt = &startedAt
+	}
+	task.updatedAt = now
+	if job := m.jobs[task.payload.JobID]; job != nil {
+		job.updatedAt = now
+	}
+}
+
+func (m *Manager) leaseCandidatesLocked(queue protocol.TaskQueue) []*taskState {
+	wantedStatus := initialStatusForQueue(queue)
+	candidates := make([]*taskState, 0)
 	for _, jobID := range m.jobOrder {
 		job := m.jobs[jobID]
 		if job == nil || job.status == protocol.JobStatusCancelled || isTerminal(jobTaskStatusToTaskStatus(job.status)) {
@@ -457,58 +478,86 @@ func (m *Manager) leaseCandidatesLocked(delayed bool) []*taskState {
 		}
 		for _, taskID := range job.taskIDs {
 			task := m.tasks[taskID]
-			if task == nil || task.status != wantedStatus || task.payload.Delayed != delayed {
+			if task == nil || task.status != wantedStatus || normalizedTaskQueue(task.payload) != queue {
 				continue
 			}
-			if !delayed && task.payload.Priority {
-				priorityCandidates = append(priorityCandidates, task)
-			} else {
-				regularCandidates = append(regularCandidates, task)
-			}
+			candidates = append(candidates, task)
 		}
 	}
-	return append(priorityCandidates, regularCandidates...)
+	return candidates
 }
 
 func (m *Manager) hasRegularWorkLocked() bool {
 	for _, task := range m.tasks {
-		if task != nil && !task.payload.Delayed && !isTerminal(task.status) {
+		if task == nil || isTerminal(task.status) {
+			continue
+		}
+		queue := normalizedTaskQueue(task.payload)
+		if queue == protocol.TaskQueueNormal || queue == protocol.TaskQueuePriority {
 			return true
 		}
 	}
 	return false
 }
 
-func (m *Manager) delayedLeaseCapacityLocked(clientID string, requested int) int {
+func (m *Manager) hasQueueWorkLocked(queue protocol.TaskQueue) bool {
+	for _, task := range m.tasks {
+		if task != nil && normalizedTaskQueue(task.payload) == queue && !isTerminal(task.status) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) queueLeaseCapacityLocked(queue protocol.TaskQueue, clientID string, requested int) int {
 	if requested <= 0 {
 		return 0
 	}
-	maxRunning := m.cfg.Execution.Delayed.MaxRunning
-	if maxRunning <= 0 {
-		maxRunning = 1
+	maxRunning, maxPerClient := m.queueLimits(queue)
+	if maxRunning > 0 {
+		globalAvailable := maxRunning - m.queueActiveCountLocked(queue, "")
+		if globalAvailable <= 0 {
+			return 0
+		}
+		if requested > globalAvailable {
+			requested = globalAvailable
+		}
 	}
-	maxPerClient := m.cfg.Execution.Delayed.MaxPerClient
-	if maxPerClient <= 0 {
-		maxPerClient = 1
-	}
-	globalAvailable := maxRunning - m.delayedActiveCountLocked("")
-	clientAvailable := maxPerClient - m.delayedActiveCountLocked(clientID)
-	if globalAvailable <= 0 || clientAvailable <= 0 {
-		return 0
-	}
-	if requested > globalAvailable {
-		requested = globalAvailable
-	}
-	if requested > clientAvailable {
-		requested = clientAvailable
+	if maxPerClient > 0 {
+		clientAvailable := maxPerClient - m.queueActiveCountLocked(queue, clientID)
+		if clientAvailable <= 0 {
+			return 0
+		}
+		if requested > clientAvailable {
+			requested = clientAvailable
+		}
 	}
 	return requested
 }
 
-func (m *Manager) delayedActiveCountLocked(clientID string) int {
+func (m *Manager) queueLimits(queue protocol.TaskQueue) (int, int) {
+	switch queue {
+	case protocol.TaskQueueLowPriority:
+		return m.cfg.Execution.LowPriority.MaxRunning, m.cfg.Execution.LowPriority.MaxPerClient
+	case protocol.TaskQueueDelayed:
+		maxRunning := m.cfg.Execution.Delayed.MaxRunning
+		if maxRunning <= 0 {
+			maxRunning = 1
+		}
+		maxPerClient := m.cfg.Execution.Delayed.MaxPerClient
+		if maxPerClient <= 0 {
+			maxPerClient = 1
+		}
+		return maxRunning, maxPerClient
+	default:
+		return 0, 0
+	}
+}
+
+func (m *Manager) queueActiveCountLocked(queue protocol.TaskQueue, clientID string) int {
 	count := 0
 	for _, task := range m.tasks {
-		if task == nil || !task.payload.Delayed || task.status == protocol.TaskStatusDelayed || isTerminal(task.status) {
+		if task == nil || normalizedTaskQueue(task.payload) != queue || task.status == initialStatusForQueue(queue) || isTerminal(task.status) {
 			continue
 		}
 		if clientID == "" || task.clientID == clientID {
@@ -557,6 +606,7 @@ func (m *Manager) jobSnapshotLocked(job *jobState) protocol.JobSnapshot {
 		AssetHash:    job.request.AssetHash,
 		Total:        counts.total,
 		Queued:       counts.queued,
+		LowPriority:  counts.lowPriority,
 		Delayed:      counts.delayed,
 		Running:      counts.running,
 		Succeeded:    counts.succeeded,
@@ -591,6 +641,7 @@ func (m *Manager) taskSnapshotLocked(task *taskState) protocol.TaskSnapshot {
 		BundlePath:         task.payload.BundlePath,
 		BundleHash:         task.payload.BundleHash,
 		EstimatedSizeBytes: task.payload.EstimatedSizeBytes,
+		Queue:              normalizedTaskQueue(task.payload),
 		Priority:           task.payload.Priority,
 		Delayed:            task.payload.Delayed,
 		Status:             task.status,
@@ -609,24 +660,26 @@ func (m *Manager) taskSnapshotLocked(task *taskState) protocol.TaskSnapshot {
 }
 
 type jobCounts struct {
-	total     int
-	queued    int
-	delayed   int
-	running   int
-	succeeded int
-	failed    int
-	cancelled int
+	total       int
+	queued      int
+	lowPriority int
+	delayed     int
+	running     int
+	succeeded   int
+	failed      int
+	cancelled   int
 }
 
 type Overview struct {
-	Jobs      int
-	Total     int
-	Queued    int
-	Delayed   int
-	Running   int
-	Succeeded int
-	Failed    int
-	Cancelled int
+	Jobs        int
+	Total       int
+	Queued      int
+	LowPriority int
+	Delayed     int
+	Running     int
+	Succeeded   int
+	Failed      int
+	Cancelled   int
 }
 
 func (m *Manager) jobCountsLocked(job *jobState) jobCounts {
@@ -648,6 +701,8 @@ func (m *Manager) overviewLocked() Overview {
 		switch task.status {
 		case protocol.TaskStatusQueued:
 			overview.Queued++
+		case protocol.TaskStatusLowPriority:
+			overview.LowPriority++
 		case protocol.TaskStatusDelayed:
 			overview.Delayed++
 		case protocol.TaskStatusLeased, protocol.TaskStatusRunning, protocol.TaskStatusUploadingResult, protocol.TaskStatusUploadingS3:
@@ -667,6 +722,8 @@ func accumulateTaskCounts(counts *jobCounts, status protocol.TaskStatus) {
 	switch status {
 	case protocol.TaskStatusQueued:
 		counts.queued++
+	case protocol.TaskStatusLowPriority:
+		counts.lowPriority++
 	case protocol.TaskStatusDelayed:
 		counts.delayed++
 	case protocol.TaskStatusLeased, protocol.TaskStatusRunning, protocol.TaskStatusUploadingResult, protocol.TaskStatusUploadingS3:
@@ -695,6 +752,37 @@ func jobTaskStatusToTaskStatus(status protocol.JobStatus) protocol.TaskStatus {
 	default:
 		return protocol.TaskStatusRunning
 	}
+}
+
+func initialStatusForQueue(queue protocol.TaskQueue) protocol.TaskStatus {
+	switch queue {
+	case protocol.TaskQueueLowPriority:
+		return protocol.TaskStatusLowPriority
+	case protocol.TaskQueueDelayed:
+		return protocol.TaskStatusDelayed
+	default:
+		return protocol.TaskStatusQueued
+	}
+}
+
+func normalizeTaskQueue(payload *protocol.TaskPayload) {
+	payload.Queue = normalizedTaskQueue(*payload)
+	payload.Priority = payload.Queue == protocol.TaskQueuePriority
+	payload.Delayed = payload.Queue == protocol.TaskQueueDelayed
+}
+
+func normalizedTaskQueue(payload protocol.TaskPayload) protocol.TaskQueue {
+	switch payload.Queue {
+	case protocol.TaskQueuePriority, protocol.TaskQueueLowPriority, protocol.TaskQueueDelayed, protocol.TaskQueueNormal:
+		return payload.Queue
+	}
+	if payload.Delayed {
+		return protocol.TaskQueueDelayed
+	}
+	if payload.Priority {
+		return protocol.TaskQueuePriority
+	}
+	return protocol.TaskQueueNormal
 }
 
 func clampProgress(v float64) float64 {
