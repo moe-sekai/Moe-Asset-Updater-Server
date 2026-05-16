@@ -149,6 +149,11 @@ regions:
       keep_types: [audio, image, json]
       keep_extensions: []
       remove_filtered_files: true
+      mesh:
+        export_obj: true
+        path_patterns:
+          - "^mysekai/fixture(?:/|$)"
+          - "^mysekai/site/field/my_room_asset/skin(?:/|$)"
       usm:
         export: false
         decode: false
@@ -201,6 +206,11 @@ regions:
       keep_types: []
       keep_extensions: []
       remove_filtered_files: true
+      mesh:
+        export_obj: true
+        path_patterns:
+          - "^mysekai/fixture(?:/|$)"
+          - "^mysekai/site/field/my_room_asset/skin(?:/|$)"
       usm:
         export: true
         decode: true

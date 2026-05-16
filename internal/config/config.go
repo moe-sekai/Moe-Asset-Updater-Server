@@ -211,12 +211,18 @@ type ExportConfig struct {
 	KeepTypes           []string          `yaml:"keep_types"`
 	KeepExtensions      []string          `yaml:"keep_extensions"`
 	RemoveFilteredFiles bool              `yaml:"remove_filtered_files"`
+	Mesh                MeshExportConfig  `yaml:"mesh"`
 	USM                 USMExportConfig   `yaml:"usm"`
 	ACB                 ACBExportConfig   `yaml:"acb"`
 	HCA                 HCAExportConfig   `yaml:"hca"`
 	Images              ImageExportConfig `yaml:"images"`
 	Video               VideoExportConfig `yaml:"video"`
 	Audio               AudioExportConfig `yaml:"audio"`
+}
+
+type MeshExportConfig struct {
+	ExportOBJ    bool     `yaml:"export_obj"`
+	PathPatterns []string `yaml:"path_patterns"`
 }
 
 type USMExportConfig struct {
@@ -422,6 +428,8 @@ func (r RegionConfig) ExportOptions() protocol.ExportOptions {
 	return protocol.ExportOptions{
 		ExportByCategory:         r.Export.ByCategory,
 		UnityVersion:             r.Runtime.UnityVersion,
+		ExportMeshOBJ:            r.Export.Mesh.ExportOBJ,
+		MeshOBJPathPatterns:      append([]string(nil), r.Export.Mesh.PathPatterns...),
 		ExportUSMFiles:           r.Export.USM.Export,
 		DecodeUSMFiles:           r.Export.USM.Decode,
 		ExportACBFiles:           r.Export.ACB.Export,

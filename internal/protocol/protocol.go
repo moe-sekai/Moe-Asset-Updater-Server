@@ -70,21 +70,23 @@ type CreateJobResponse struct {
 }
 
 type ExportOptions struct {
-	ExportByCategory         bool   `json:"export_by_category"`
-	UnityVersion             string `json:"unity_version,omitempty"`
-	ExportUSMFiles           bool   `json:"export_usm_files"`
-	DecodeUSMFiles           bool   `json:"decode_usm_files"`
-	ExportACBFiles           bool   `json:"export_acb_files"`
-	DecodeACBFiles           bool   `json:"decode_acb_files"`
-	DecodeHCAFiles           bool   `json:"decode_hca_files"`
-	ConvertPhotoToWebP       bool   `json:"convert_photo_to_webp"`
-	RemovePNG                bool   `json:"remove_png"`
-	ConvertVideoToMP4        bool   `json:"convert_video_to_mp4"`
-	DirectUSMToMP4WithFFmpeg bool   `json:"direct_usm_to_mp4_with_ffmpeg"`
-	RemoveM2V                bool   `json:"remove_m2v"`
-	ConvertAudioToMP3        bool   `json:"convert_audio_to_mp3"`
-	ConvertWavToFLAC         bool   `json:"convert_wav_to_flac"`
-	RemoveWav                bool   `json:"remove_wav"`
+	ExportByCategory         bool     `json:"export_by_category"`
+	UnityVersion             string   `json:"unity_version,omitempty"`
+	ExportMeshOBJ            bool     `json:"export_mesh_obj"`
+	MeshOBJPathPatterns      []string `json:"mesh_obj_path_patterns,omitempty"`
+	ExportUSMFiles           bool     `json:"export_usm_files"`
+	DecodeUSMFiles           bool     `json:"decode_usm_files"`
+	ExportACBFiles           bool     `json:"export_acb_files"`
+	DecodeACBFiles           bool     `json:"decode_acb_files"`
+	DecodeHCAFiles           bool     `json:"decode_hca_files"`
+	ConvertPhotoToWebP       bool     `json:"convert_photo_to_webp"`
+	RemovePNG                bool     `json:"remove_png"`
+	ConvertVideoToMP4        bool     `json:"convert_video_to_mp4"`
+	DirectUSMToMP4WithFFmpeg bool     `json:"direct_usm_to_mp4_with_ffmpeg"`
+	RemoveM2V                bool     `json:"remove_m2v"`
+	ConvertAudioToMP3        bool     `json:"convert_audio_to_mp3"`
+	ConvertWavToFLAC         bool     `json:"convert_wav_to_flac"`
+	RemoveWav                bool     `json:"remove_wav"`
 }
 
 type TaskPayload struct {
